@@ -395,7 +395,7 @@ public sealed class VideoJobs : IDisposable
                             Say(job, $"voice {spoken}/{total} spoken ({N(seconds)} s)");
                         }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                        catch (Exception ex) { rec = new JsonObject { ["text"] = line, ["error"] = ex.Message }; Say(job, $"voice {spoken}/{total} could not be spoken: {ex.Message}"); }
+                        catch (Exception ex) { rec = new JsonObject { ["text"] = line, ["error"] = ErrorText(ex.Message) }; Say(job, $"voice {spoken}/{total} could not be spoken: {ErrorText(ex.Message)}"); }
                     }
                     voice[i.ToString()] = rec;
                     job = Persist(job with { AssetsJson = assets.ToJsonString() });
@@ -509,7 +509,7 @@ public sealed class VideoJobs : IDisposable
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception ex) { rec["error"] = ex.Message; Say(job, $"{kind} for scene {scene + 1} could not be made: {ex.Message}"); return rec; }
+        catch (Exception ex) { rec["error"] = ErrorText(ex.Message); Say(job, $"{kind} for scene {scene + 1} could not be made: {rec["error"]}"); return rec; }
         if (bytes is not { Length: > 0 }) { rec["error"] = "the provider returned nothing"; return rec; }
         Directory.CreateDirectory(_project.MadeDir);
         var name = $"{kind}-{job.Id}-s{scene + 1}-{Slug(slot, "file")}-{Guid.NewGuid().ToString("n")[..4]}{ext}";
@@ -527,8 +527,13 @@ public sealed class VideoJobs : IDisposable
     {
         var (fw, fh) = FormatSize(format);
         double want = (double)fw / fh;
-        var candidates = ImageMaker.Candidates(_ai());
-        if (candidates.Count == 0) throw new InvalidOperationException("no AI profile can make pictures (OpenAI, the Antigravity login or Alibaba)");
+        var all = ImageMaker.Candidates(_ai());
+        if (all.Count == 0) throw new InvalidOperationException("no AI profile can make pictures (OpenAI, the Antigravity login or Alibaba)");
+        // a profile whose image quota is used up for a long while is not asked again this session (each ask cost a wait)
+        var candidates = all.Where(c => !_spent.TryGetValue(c.Name, out var until) || until <= DateTime.UtcNow).ToList();
+        if (candidates.Count == 0)
+            throw new InvalidOperationException("the image quota of " + string.Join(", ", all.Select(c => $"{c.Name} (until {_spent[c.Name].ToLocalTime():HH:mm})")) +
+                                                " is used up; add another image profile (an OpenAI or Alibaba key) or use your own pictures");
         if (reference is not null) prompt = "Use the attached picture as the reference: keep its subject, and " + prompt;
         const string noText = " No text, no letters, no logos, no signage and no watermarks anywhere in the picture.";
         (byte[] b, double off)? best = null;
@@ -551,15 +556,67 @@ public sealed class VideoJobs : IDisposable
                 if (off <= ShapeTolerance) return bytes;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception ex) { last = ex; Log.Warn($"[video] #{job.Id} still on {p.Name}: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                last = ex;
+                Log.Warn($"[video] #{job.Id} still on {p.Name}: {ex.Message}");
+                if (ResetIn(ex.Message) is { TotalSeconds: > 120 } reset)
+                {
+                    MarkSpent(p.Name, reset);
+                    Say(job, $"{p.Name}'s image quota is used up until {(DateTime.Now + reset):HH:mm}; it is not asked again until then");
+                }
+            }
         }
         if (best is null) throw last ?? new InvalidOperationException("no picture was drawn");
         return CropTo(best.Value.b, want);
     }
 
+    // profiles whose image quota is used up, and until when: kept in image-quota.json under the studio home, so the next
+    // session knows before it asks
+    private static readonly ConcurrentDictionary<string, DateTime> _spent = LoadSpent();
+    private static string SpentFile => Path.Combine(AgentConfig.Dir, "image-quota.json");
+
+    private static ConcurrentDictionary<string, DateTime> LoadSpent()
+    {
+        var d = new ConcurrentDictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            if (File.Exists(SpentFile))
+                foreach (var (k, v) in JsonSerializer.Deserialize<Dictionary<string, DateTime>>(File.ReadAllText(SpentFile)) ?? new())
+                    if (v > DateTime.UtcNow) d[k] = v.ToUniversalTime();
+        }
+        catch { }
+        return d;
+    }
+
+    internal static void MarkSpent(string profile, TimeSpan reset)
+    {
+        _spent[profile] = DateTime.UtcNow + reset;
+        try { File.WriteAllText(SpentFile, JsonSerializer.Serialize(_spent.Where(kv => kv.Value > DateTime.UtcNow).ToDictionary(kv => kv.Key, kv => kv.Value))); } catch { }
+    }
+
+    /// <summary>Whether a profile's image quota is known to be used up now, and until when (local time).</summary>
+    public static bool IsSpent(string profile, out DateTime until)
+    {
+        until = default;
+        if (!_spent.TryGetValue(profile, out var u) || u <= DateTime.UtcNow) return false;
+        until = u.ToLocalTime();
+        return true;
+    }
+
+    /// <summary>The reset a provider's refusal names: "reset after 1s", "reset after 4h51m30s", "retry in 2m"; null when none.</summary>
+    internal static TimeSpan? ResetIn(string message)
+    {
+        var m = Regex.Match(message ?? "", @"(?:reset after|retry in|retry after|try again in)\s+(?:(\d+)h)?\s*(?:(\d+)m(?!s))?\s*(?:(\d+(?:\.\d+)?)s)?", RegexOptions.IgnoreCase);
+        if (!m.Success || (!m.Groups[1].Success && !m.Groups[2].Success && !m.Groups[3].Success)) return null;
+        double G(int i) => m.Groups[i].Success ? double.Parse(m.Groups[i].Value, System.Globalization.CultureInfo.InvariantCulture) : 0;
+        return TimeSpan.FromSeconds(G(1) * 3600 + G(2) * 60 + G(3));
+    }
+
     /// <summary>A provider call that is tried again when the provider is only busy: a 429 / RESOURCE_EXHAUSTED or a 503
-    /// waits the reset the answer names ("reset after 7s"), else 5, 15 then 30 s; three more tries at most. Anything
-    /// else fails at once.</summary>
+    /// waits the reset the answer names ("reset after 7s"), else 5, 15 then 30 s; three more tries at most. A quota that
+    /// resets only in minutes or hours is not waited for (the caller moves on to another profile). Anything else fails
+    /// at once.</summary>
     private async Task<T> Throttled<T>(Func<Task<T>> call, VideoJob job, CancellationToken ct)
     {
         int[] waits = [5, 15, 30];
@@ -567,10 +624,10 @@ public sealed class VideoJobs : IDisposable
         {
             try { return await call().ConfigureAwait(false); }
             catch (Exception ex) when (attempt < waits.Length && !ct.IsCancellationRequested
-                && Regex.IsMatch(ex.Message, @"\b(429|503)\b|RESOURCE_EXHAUSTED|UNAVAILABLE|rate.?limit|Throttling", RegexOptions.IgnoreCase))
+                && Regex.IsMatch(ex.Message, @"\b(429|503)\b|RESOURCE_EXHAUSTED|UNAVAILABLE|rate.?limit|Throttling", RegexOptions.IgnoreCase)
+                && !(ResetIn(ex.Message) is { TotalSeconds: > 120 }))
             {
-                var named = Regex.Match(ex.Message, @"reset after (\d+(?:\.\d+)?)\s*s", RegexOptions.IgnoreCase);
-                var wait = named.Success ? Math.Min(120, double.Parse(named.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) + 2) : waits[attempt];
+                var wait = ResetIn(ex.Message) is { } named ? Math.Min(120, named.TotalSeconds + 2) : waits[attempt];
                 Say(job, $"the provider is busy; trying again in {N(wait)} s");
                 await Task.Delay(TimeSpan.FromSeconds(wait), ct).ConfigureAwait(false);
             }
@@ -842,7 +899,7 @@ public sealed class VideoJobs : IDisposable
         var report = ParseObject(job.ReportJson ?? "{}");
         var notes = new List<string>();
         foreach (var n in (report["notes"] as JsonArray ?? new JsonArray()).Concat(assets["notes"] as JsonArray ?? new JsonArray()))
-            if (Text(n) is { Length: > 0 } s && !notes.Contains(s)) notes.Add(s);
+            if (Text(n) is { Length: > 0 } s && !notes.Contains(ErrorText(s))) notes.Add(ErrorText(s));
         var head = $"[Result of video job #{job.Id}, queued with make_video: this is not a message typed by the operator]\n";
         if (job.Status != VideoJob.Done)
         {
@@ -857,10 +914,11 @@ public sealed class VideoJobs : IDisposable
         var sb = new StringBuilder();
         if (job.Kind == "doc") sb.Append($"Video: \"{job.Title}\", {N(duration)} s, rendered from the Studio project {job.DocPath}.\n");
         else sb.Append($"Video: \"{job.Title}\", {N(duration)} s, {format} ({fw}x{fh}).\n");
-        sb.Append($"The video: {job.Video}\n");
-        if (job.Poster is not null) sb.Append($"The last frame as a picture (a static banner, PNG): {job.Poster}\n");
-        if (job.Sheet is not null) sb.Append($"Contact sheet (the middle of every scene): {job.Sheet}\n");
-        if (job.Project is not null) sb.Append($"Project file (edit_video open source={job.Id} to change anything in it; /edit {job.Id} opens it in the Studio in the browser): {job.Project}\n");
+        string Full(string rel) => Path.GetFullPath(Path.Combine(_project.Root, rel));
+        sb.Append($"The video: {Full(job.Video!)}\n");
+        if (job.Poster is not null) sb.Append($"The last frame as a picture (a static banner, PNG): {Full(job.Poster)}\n");
+        if (job.Sheet is not null) sb.Append($"Contact sheet (the middle of every scene): {Full(job.Sheet)}\n");
+        if (job.Project is not null) sb.Append($"Project file: {Full(job.Project)}\n");
         if (job.Kind != "doc") sb.Append("Scenes:\n");
         var reported = (report["scenes"] as JsonArray)?.OfType<JsonObject>().ToList() ?? new List<JsonObject>();
         var written = job.Kind == "doc" ? new List<JsonObject>() : (script["scenes"] as JsonArray)?.OfType<JsonObject>().ToList() ?? new List<JsonObject>();
@@ -880,6 +938,10 @@ public sealed class VideoJobs : IDisposable
         var checks = (report["checks"] as JsonArray ?? new JsonArray()).Concat(report["warnings"] as JsonArray ?? new JsonArray())
             .Select(Text).Where(x => x is { Length: > 0 }).Distinct().Take(8).ToList();
         if (checks.Count > 0) sb.Append("Checks:\n- " + string.Join("\n- ", checks) + "\n");
+        // how to change it by hand: the Studio's own editor, from the project file on this computer
+        if (job.Project is not null)
+            sb.Append($"Edit it in Vanity Studio: open {MakeVideoTool.StudioUrl()}#/home, click \"Import video project\" and choose the project file above " +
+                      $"(or /edit {job.Id} opens it there in one step). To change it by asking: edit_video open source={job.Id}.\n");
         var facts = sb.ToString().TrimEnd();
         return (head + facts, $"✓ The video \"{job.Title}\" is ready (job #{job.Id}).\n" + facts);
     }

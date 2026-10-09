@@ -1014,8 +1014,24 @@ namespace VanityStudio.Video
                 if (big && /\.(jpe?g|png|webp|avif)(\?|$)/i.test(big.href)) add(big.href, i.alt, 0, 0, 'full size of the one above');
             }
             const prices = [...main.querySelectorAll('[itemprop=price], .price, [class*=price], [data-price]')].map((e) => t(e.innerText || e.content)).filter((x) => /\d/.test(x) && x.length < 40);
+            // the brand's colours as the page wears them: its theme colour, then the saturated colours of its buttons,
+            // links, header and headings, by how much they are used (greys and see-through colours do not count)
+            const hues = new Map();
+            const tint = (c, w) => { const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/.exec(c || ''); if (!m || (m[4] !== undefined && +m[4] < 0.6)) return;
+                const r = +m[1], g = +m[2], b = +m[3]; if (Math.max(r, g, b) - Math.min(r, g, b) < 45) return;
+                const hex = '#' + [r, g, b].map((x) => x.toString(16).padStart(2, '0')).join(''); hues.set(hex, (hues.get(hex) || 0) + w); };
+            for (const e of document.querySelectorAll('button, [role=button], a, [class*=btn], [class*=button], header, nav, h1, h2, [class*=price], [class*=badge]')) {
+                const r = e.getBoundingClientRect(); if (r.width < 4 || r.height < 4) continue; const cs = getComputedStyle(e);
+                tint(cs.backgroundColor, 4); tint(cs.color, 1); tint(cs.borderTopColor, 1); }
+            const theme = meta('theme-color');
+            const colors = [...new Set([/^#[0-9a-f]{6}$/i.test(theme) ? theme.toLowerCase() : null, ...[...hues.entries()].sort((a, b) => b[1] - a[1]).map((x) => x[0])].filter(Boolean))].slice(0, 5);
+            // the logo: a picture in the header or named logo, else the site's large icon
+            const logoImg = document.querySelector('header img[src], [class*=logo] img[src], img[class*=logo][src], img[alt*=logo i][src], img[src*=logo i], a[href=""/""] img[src]');
+            const icon = document.querySelector('link[rel=""apple-touch-icon""], link[rel~=""icon""][sizes]');
+            const logo = logoImg ? (logoImg.currentSrc || logoImg.src) : icon ? icon.href : '';
             return { url: location.href, lang: document.documentElement.lang || '', title: document.title, ogTitle: meta('og:title'), description: meta('description') || meta('og:description'),
                 price: meta('product:price:amount') || meta('og:price:amount'), currency: meta('product:price:currency') || meta('og:price:currency'), prices: [...new Set(prices)].slice(0, 8),
+                colors, logo,
                 headings: [...main.querySelectorAll('h1, h2, h3')].map((h) => t(h.innerText)).filter(Boolean).slice(0, 30),
                 data: JSON.stringify(ld).slice(0, 8000), text: t(main.innerText).slice(0, 14000), pictures: pics.slice(0, 40) };
         })())";

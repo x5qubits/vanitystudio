@@ -233,6 +233,23 @@ public static class VideoText
         _ => n.ToJsonString(),
     };
     public static string Short(string s) => s.Length > 60 ? s[..57] + "..." : s;
+
+    /// <summary>A provider's error as one readable line: the text before its JSON body plus the body's "message"
+    /// ("Antigravity 429: You have exhausted your capacity on this model..."), and what follows the body; never the raw JSON.</summary>
+    public static string ErrorText(string error)
+    {
+        error ??= "";
+        var brace = error.IndexOf('{');
+        if (brace < 0) return error.Length > 300 ? error[..297] + "..." : error;
+        var head = error[..brace].Trim().TrimEnd(':').Trim();
+        var m = Regex.Match(error, "\"message\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+        var said = m.Success ? Regex.Unescape(m.Groups[1].Value) : "the provider refused it";
+        // what was written after the provider's (possibly cut) JSON: "... The scene uses its fallback."
+        var last = error.LastIndexOf("....", StringComparison.Ordinal);
+        var after = last >= 0 ? error[(last + 4)..].Trim().TrimStart('.').Trim() : "";
+        var text = (head.Length > 0 ? head + ": " : "") + said + (after.Length > 0 ? " " + after : "");
+        return text.Length > 400 ? text[..397] + "..." : text;
+    }
     // numbers the model reads are written the same on every locale ("1.2", never "1,2")
     public static string N(double v) => v.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
     public static string Slug(string s, string fallback)

@@ -441,7 +441,11 @@ public sealed class EditVideoTool : IVisualTool
             return Ok(id, $"Clip made: media/{Path.GetFileName(clip)} ({N(MediaSeconds(clip))} s). Use it as a scene {{\"video\": \"media/{Path.GetFileName(clip)}\", \"dur\": ...}}.");
         }
         var (fw, fh) = FormatSize(Str(doc["format"]));
-        var candidates = ImageMaker.Candidates(_ai());
+        var all = ImageMaker.Candidates(_ai());
+        var candidates = all.Where(c => !VideoJobs.IsSpent(c.Name, out _)).ToList();
+        if (all.Count > 0 && candidates.Count == 0)
+            return Fail(id, "the image quota of " + string.Join(", ", all.Select(c => { VideoJobs.IsSpent(c.Name, out var u); return $"{c.Name} (until {u:HH:mm})"; })) +
+                            " is used up: use the site's pictures (web download) or the operator's files.");
         if (candidates.Count == 0) return Fail(id, "no AI profile can make pictures (OpenAI, the Antigravity login or Alibaba).");
         Exception? last = null;
         foreach (var p in candidates)
@@ -456,9 +460,13 @@ public sealed class EditVideoTool : IVisualTool
                 return Ok(id, $"Still drawn by {p.Name}: media/{Path.GetFileName(still)} ({w}x{h}). Use it as a scene {{\"image\": \"media/{Path.GetFileName(still)}\", ...}} or an image layer. Look at it with read_file.");
             }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { last = ex; }
+            catch (Exception ex)
+            {
+                last = ex;
+                if (VideoJobs.ResetIn(ex.Message) is { TotalSeconds: > 120 } reset) VideoJobs.MarkSpent(p.Name, reset);
+            }
         }
-        return Fail(id, "no profile could draw it: " + last?.Message);
+        return Fail(id, "no profile could draw it: " + ErrorText(last?.Message ?? ""));
     }
 
     private ToolResultRecord Render(string id, string name, string title)

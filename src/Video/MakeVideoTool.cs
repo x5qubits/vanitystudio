@@ -258,6 +258,10 @@ public sealed class MakeVideoTool : IVisualTool
         catch (JsonException ex) { return ([], ScriptError(text, ex)); }
         catch (Exception ex) { return ([], "script is not valid JSON: " + ex.Message); }
         if (node is not JsonObject script) return ([], "script must be one JSON object.");
+        // the brand's colours from brand.json when the script names the brand but not its colours: without a colour (or
+        // a logo) the Studio puts every film of a treatment on the same look
+        if (script["brand"] is JsonObject sb && sb["colors"] is null && _project.Brand()["colors"] is JsonArray known && known.Count > 0)
+            sb["colors"] = known.DeepClone();
 
         var (cat, catError) = await CatalogAsync(ct).ConfigureAwait(false);
         if (cat is null) return ([], catError!);
@@ -646,8 +650,13 @@ public sealed class MakeVideoTool : IVisualTool
         {
             if (Bool(script["voice"]) == true && VoiceMaker.Candidates(ai).Count == 0)
                 errors.Add("voice: no AI profile can speak the lines (a Gemini, OpenAI or Alibaba API-key profile with the voice role: /voice <profile>); set \"voice\": false.");
-            if (stills && ImageMaker.Candidates(ai).Count == 0)
+            var drawers = ImageMaker.Candidates(ai);
+            if (stills && drawers.Count == 0)
                 errors.Add("files: no AI profile can make pictures (OpenAI, the Antigravity login or Alibaba); use the project's own files instead of {\"make\": \"still\"}.");
+            else if (stills && drawers.All(c => VideoJobs.IsSpent(c.Name, out _)))
+                errors.Add("files: the image quota of " + string.Join(", ", drawers.Select(c => { VideoJobs.IsSpent(c.Name, out var u); return $"{c.Name} (until {u:HH:mm})"; })) +
+                           " is used up, so no picture can be made now: use the site's own pictures (web read / web download), screens of the site " +
+                           "(screen-demo), the project's files, or blocks that need no picture, instead of {\"make\": \"still\"}.");
             if (clips && ClipMaker.Candidates(ai).Count == 0)
                 errors.Add("files: no AI profile can make clips (an Alibaba DashScope API key); use the project's own clips or a block that needs no clip.");
         }

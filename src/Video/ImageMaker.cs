@@ -172,10 +172,33 @@ public static class ImageMaker
         ["https://cloudcode-pa.googleapis.com", "https://daily-cloudcode-pa.googleapis.com"];
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _agProject = new();
 
+    /// <summary>The login's image models in the order they are tried: the profile's own (or the default), then the
+    /// others. Google counts the image quota per model ("You have exhausted your capacity on this model"), so a login
+    /// whose first model is used up for hours can still draw with the next one.</summary>
+    private static readonly string[] AgImageModels = ["gemini-3.1-flash-image", "gemini-2.5-flash-image", "gemini-3-pro-image"];
+
     private static async Task<byte[]> AntigravityAsync(string prompt, int w, int h, AiProfile p, CancellationToken ct, byte[]? reference = null)
     {
+        var models = new[] { ResolveGeminiImageModel(p) }.Concat(AgImageModels).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        Exception? last = null, quota = null;
+        foreach (var model in models)
+        {
+            try { return await AntigravityModelAsync(prompt, w, h, p, model, ct, reference).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) when (ex.Message.Contains("429") || ex.Message.Contains("RESOURCE_EXHAUSTED") || ex.Message.Contains("404") || ex.Message.Contains("NOT_FOUND"))
+            {
+                // this model's quota is used up (or the login does not have it): the next model has its own
+                if (quota is null && (ex.Message.Contains("429") || ex.Message.Contains("RESOURCE_EXHAUSTED"))) quota = ex;
+                last = ex;
+            }
+        }
+        // a used-up quota says more than the "not found" of a model the login does not have
+        throw quota ?? last ?? new InvalidOperationException("Antigravity image failed.");
+    }
+
+    private static async Task<byte[]> AntigravityModelAsync(string prompt, int w, int h, AiProfile p, string model, CancellationToken ct, byte[]? reference)
+    {
         var token  = p.OAuthAccessToken!;
-        var model  = ResolveGeminiImageModel(p);
         var aspect = AspectFor(w, h);
         var projId = await EnsureAgProjectAsync(token, p.OAuthAccountId, ct).ConfigureAwait(false);
 

@@ -82,6 +82,9 @@ public sealed class WebTool : ITool
         var price = Str(page["price"]);
         if (price is { Length: > 0 }) sb.Append($"Price (published): {price} {Str(page["currency"])}\n");
         if (page["prices"] is JsonArray ps && ps.Count > 0) sb.Append("Prices on the page: " + string.Join(" | ", ps.Select(Str)) + "\n");
+        if (page["colors"] is JsonArray cs && cs.Count > 0)
+            sb.Append("Brand colours (theme, then buttons and headings, most used first): " + string.Join(", ", cs.Select(Str)) + " → brand.colors (the first one or two)\n");
+        if (Str(page["logo"]) is { Length: > 0 } logo) sb.Append("Logo: " + logo + " → web download it, then brand save logo=<its path> (it becomes media:logo)\n");
         if (page["headings"] is JsonArray hs && hs.Count > 0) sb.Append("Headings: " + string.Join(" · ", hs.Select(Str)) + "\n");
         if (Str(page["data"]) is { Length: > 2 } data && data != "[]") sb.Append("Product data the page publishes (JSON-LD): " + data + "\n");
         if (Str(page["text"]) is { Length: > 0 } text) sb.Append("Text:\n" + text + "\n");

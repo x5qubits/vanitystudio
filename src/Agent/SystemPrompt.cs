@@ -98,7 +98,8 @@ public static class SystemPrompt
         "anywhere on the machine (files list folder=desktop / files find), and the brand's logo as media:logo. When the request names a " +
         "web address (a shop, a product page), web read it: its name, price, offer and selling points come from the page, never from memory; " +
         "web download the product's own pictures (the largest, cleanest ones) and use them in the scenes; when the folder has no brand yet, " +
-        "brand save what the page says (name, url, facts).\n" +
+        "brand save what the page says (name, url, facts), its colours (the first one or two web read lists) and its logo (web download, then " +
+        "brand save logo=<path>).\n" +
         "2. make_video action=blocks: the scenes you can use (once per session is enough; it does not change while you work).\n" +
         "3. For every picture you will cut a part from or point into, make_video action=look file=<the picture>, and read the point or the box " +
         "off its grid. For a website, make_video action=site url=<address> (clicks=[...], login=true behind a login): its steps and words are " +
@@ -108,7 +109,10 @@ public static class SystemPrompt
         "the viewer gains, the last what to do. Fields:\n" +
         "   - \"voice\": true for ads over 8 s, tutorials, presentation videos, or lines over 10 words; false for logo reveals and 3-5 s pure visuals, " +
         "and false when no profile can speak (make_video says so).\n" +
-        "   - \"brand\": name, url, \"logo\":\"media:logo\" (when the project has a logo). \"format\": \"reel\" unless the request names another: " +
+        "   - \"brand\": name, url, \"logo\":\"media:logo\" (when the project has a logo), \"colors\": the brand's colours (brand.json, or what web " +
+        "read found on its site). The Studio dresses the film in the brand's colour and varies the look per video around it; a brand with no " +
+        "colour and no logo always lands on the same look, so then name \"look\" yourself from make_video action=blocks, one whose summary fits, " +
+        "and a different one than the last video unless the brand's signature names one. \"format\": \"reel\" unless the request names another: " +
         "a Facebook or Instagram feed ad or post: portrait (4:5); a story, reel, TikTok or Shorts ad: reel; a square post: square; YouTube or a " +
         "website: landscape.\n" +
         "   - \"treatment\": pick a stance that fits (bold | calm | editorial | kinetic | cinematic | retro). Steers look pool, music mood and " +
