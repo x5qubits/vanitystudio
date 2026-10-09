@@ -450,12 +450,15 @@ public sealed class LlmRouter : ILlmClient
     /// <summary>The roles a profile can hold for media only: the voice-over, pictures, clips.</summary>
     internal static readonly string[] MediaLayers = ["voice", "photo_gen", "product_gen", "image_gen", "image", "video_gen"];
 
-    /// <summary>A profile that only makes media: never asked to chat, not even as the last resort.</summary>
+    /// <summary>A profile that only makes media: never asked to chat, not even as the last resort. That is one whose roles
+    /// are all media, or whose models are all voice (TTS) models: "/key gemini ... gemini-2.5-flash-preview-tts" made the
+    /// voice model the chat's (2026-10-09).</summary>
     internal static bool MediaOnly(AiProfile p) =>
-        p.Layers.Length > 0 && p.Layers.All(l => MediaLayers.Contains(l, StringComparer.OrdinalIgnoreCase));
+        (p.Layers.Length > 0 && p.Layers.All(l => MediaLayers.Contains(l, StringComparer.OrdinalIgnoreCase)))
+        || (p.Models.Length > 0 && p.Models.All(m => m.Contains("tts", StringComparison.OrdinalIgnoreCase)));
 
     private List<AiProfile> GetCandidates(string layer) =>
-        _opts.Profiles.Where(p => IsUsable(p) && p.Layers.Contains(layer, StringComparer.OrdinalIgnoreCase)).ToList();
+        _opts.Profiles.Where(p => IsUsable(p) && !MediaOnly(p) && p.Layers.Contains(layer, StringComparer.OrdinalIgnoreCase)).ToList();
 
     private static bool IsUsable(AiProfile p) =>
         p.Enabled && (p.ApiKeys.Length == 0 || p.ApiKeys.Any(k => !string.IsNullOrWhiteSpace(k) && !k.StartsWith("YOUR_")));

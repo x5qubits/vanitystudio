@@ -37,6 +37,19 @@ API keys are added inside the chat with `/key` (OpenAI, Anthropic, Gemini, Grok,
 OpenRouter, Perplexity, Alibaba DashScope, Ollama, or any OpenAI-compatible URL). Running `vanity-studio` with no
 profile at all starts a setup menu.
 
+A profile can hold several keys of the same provider; each is tried in turn when one runs out of quota. Give them in
+one line, separated by spaces or commas, with the model anywhere among them. Running it again adds keys to the profile
+and keeps its role and model:
+
+```
+/key gemini AIza...first AIza...second gemini-2.5-flash-preview-tts
+/key gemini AIza...third
+/voice gemini
+```
+
+A key profile kept for the voice (or pictures, clips) while a login writes the scripts never writes them itself, not
+even when the login is busy, so it is never billed for the chat.
+
 Then check everything:
 
 ```bash

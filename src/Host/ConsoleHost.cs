@@ -332,13 +332,13 @@ public sealed class ConsoleHost
             {
                 case "1": await LoginAsync("antigravity", null, ct); return true;
                 case "2": await LoginAsync("openai", null, ct); return true;
-                case "3": await KeyAsync("openai", null, null, ct); return true;
-                case "4": await KeyAsync("gemini", null, null, ct); return true;
+                case "3": await KeyAsync("openai", [], ct); return true;
+                case "4": await KeyAsync("gemini", [], ct); return true;
                 case "5": await LoginAsync("anthropic", null, ct); return true;
                 case "6": await LoginAsync("grok", null, ct); return true;
-                case "7": await KeyAsync("grok", null, null, ct); return true;
-                case "8": await KeyAsync(null, null, null, ct); return true;
-                case "9": await KeyAsync("ollama", null, null, ct); return true;
+                case "7": await KeyAsync("grok", [], ct); return true;
+                case "8": await KeyAsync(null, [], ct); return true;
+                case "9": await KeyAsync("ollama", [], ct); return true;
                 default: return false;
             }
         }
@@ -1104,7 +1104,7 @@ public sealed class ConsoleHost
                 case "/studio": Console.WriteLine("  " + MakeVideoTool.StudioUrl()); Dim("  VANITY_STUDIO_URL or /set StudioUrl <url> points at another Studio"); break;
                 // models and logins
                 case "/login": await LoginAsync(rest.ElementAtOrDefault(0), rest.ElementAtOrDefault(1), ct); Rebuild(); break;
-                case "/key": await KeyAsync(rest.ElementAtOrDefault(0), rest.ElementAtOrDefault(1), rest.ElementAtOrDefault(2), ct); Rebuild(); break;
+                case "/key": await KeyAsync(rest.ElementAtOrDefault(0), rest.Skip(1).ToArray(), ct); Rebuild(); break;
                 case "/profiles": case "/profile": PrintProfiles(); break;
                 case "/use": Use(rest.ElementAtOrDefault(0)); break;
                 case "/model": SetModel(rest.ElementAtOrDefault(0)); break;
@@ -1333,8 +1333,42 @@ public sealed class ConsoleHost
         ("custom",     "Custom OpenAI-compatible URL", ""),
     ];
 
-    private async Task KeyAsync(string? provider, string? key, string? model, CancellationToken ct)
+    /// <summary>
+    /// /key provider [key ...] [model]: keys and the model in any order, keys also comma-separated. A profile that exists
+    /// gets the new keys added to the ones it has (each key is tried in turn when one is out of quota) and keeps its
+    /// place, its roles and its model; /key used to replace it, so four pasted keys left one (2026-10-09).
+    /// </summary>
+    private async Task KeyAsync(string? provider, string[] args, CancellationToken ct)
     {
+        var tokens = args.SelectMany(a => a.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .Select(t => t.Trim('"', '\'')).Where(t => t.Length > 0).ToList();
+        var keys = tokens.Where(LooksLikeKey).Distinct(StringComparer.Ordinal).ToList();
+        var model = tokens.FirstOrDefault(t => !LooksLikeKey(t));
+        provider = provider?.Trim().ToLowerInvariant();
+        if (provider is "xai") provider = "grok";
+        if (provider is "google") provider = "gemini";
+        var existing = provider is null ? null : AgentConfig.Load().Profiles.FirstOrDefault(p => p.Name.Equals(provider, StringComparison.OrdinalIgnoreCase)
+            && p.Provider.Equals(provider, StringComparison.OrdinalIgnoreCase) && provider is not ("anthropic" or "ollama" or "custom"));
+        if (existing is not null && keys.Count > 0)
+        {
+            var before = existing.ApiKeys.Count(k => !string.IsNullOrWhiteSpace(k));
+            existing.ApiKeys = existing.ApiKeys.Where(k => !string.IsNullOrWhiteSpace(k)).Concat(keys).Distinct(StringComparer.Ordinal).ToArray();
+            if (!string.IsNullOrWhiteSpace(model)) existing.Models = [model];
+            existing.Enabled = true;
+            AgentConfig.Upsert(existing, makeDefault: false);
+            var added = existing.ApiKeys.Length - before;
+            Green($"  Profile '{existing.Name}': {existing.ApiKeys.Length} key(s) ({(added > 0 ? $"{added} added" : "all already there")}) · model {existing.Models.FirstOrDefault()}");
+            return;
+        }
+        await NewKeyProfileAsync(provider, keys, model, ct);
+    }
+
+    // an API key, not a model name: long, one word, with capitals (models are lower case: gemini-2.5-flash-preview-tts, gpt-5.5)
+    private static bool LooksLikeKey(string t) => t.Length >= 20 && !t.Contains('/') && t.Any(char.IsUpper) && t.All(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.');
+
+    private async Task NewKeyProfileAsync(string? provider, List<string> keys, string? model, CancellationToken ct)
+    {
+        string? key = keys.Count > 0 ? string.Join(",", keys) : null;
         provider = provider?.Trim().ToLowerInvariant();
         if (provider is "xai") provider = "grok";
         if (provider is "google") provider = "gemini";
@@ -1366,15 +1400,16 @@ public sealed class ConsoleHost
         }
         else
         {
-            key ??= await ReadSecretAsync($"  {def.Label} API key: ", ct);
-            key = key?.Trim().Trim('"', '\'') ?? "";
-            if (key.Length == 0) throw new ArgumentException("an API key is required");
+            key ??= await ReadSecretAsync($"  {def.Label} API key (several: comma-separated): ", ct);
+            var given = (key ?? "").Split([',', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(k => k.Trim('"', '\'')).Where(k => k.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
+            if (given.Length == 0) throw new ArgumentException("an API key is required");
             if (provider == "anthropic")
             {
-                var anth = OAuthFlows.AnthropicFromSecret(profile.Name, key);
+                var anth = OAuthFlows.AnthropicFromSecret(profile.Name, given[0]);
                 profile = anth;
             }
-            else profile.ApiKeys = [key];
+            else profile.ApiKeys = given;
         }
         if (string.IsNullOrWhiteSpace(model))
         {
@@ -1385,7 +1420,7 @@ public sealed class ConsoleHost
             profile.Models = [model];
         if (profile.Models.Length == 0) throw new ArgumentException("a model name is required");
         AgentConfig.Upsert(profile);
-        Green($"  Saved profile '{profile.Name}' ({profile.Provider}) · model {profile.Models[0]}");
+        Green($"  Saved profile '{profile.Name}' ({profile.Provider}) · {profile.ApiKeys.Length} key(s) · model {profile.Models[0]}");
     }
 
     private void PrintProfiles()
