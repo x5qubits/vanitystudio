@@ -358,7 +358,8 @@ public sealed class ConsoleHost
         _jobs.EditLink = id => EditServer().EditLink(id);
         _jobs.Start();
         var open = _jobs.Store.All().Where(j => j.Open).ToList();
-        if (open.Count > 0) Dim($"  [{open.Count} video job(s) of this folder resume: {string.Join(", ", open.Select(j => "#" + j.Id))}]");
+        if (_jobs.Passive) Dim("  [another Vanity Studio session is open in this folder: it makes the videos asked for here, and shows their progress]");
+        else if (open.Count > 0) Dim($"  [{open.Count} video job(s) of this folder resume: {string.Join(", ", open.Select(j => "#" + j.Id))}]");
     }
 
     private void Build()

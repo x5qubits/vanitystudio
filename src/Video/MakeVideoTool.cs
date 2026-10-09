@@ -474,7 +474,8 @@ public sealed class MakeVideoTool : IVisualTool
     /// a file slot named after the wrong word when the block has one slot of that kind (device-mockup's "picture" is its
     /// "screen"), a block or a param named a letter or two off, a format said as "9:16" or "story", a number or a yes/no
     /// written as text, a single text where a list is taken, an unknown look, music or treatment (back to auto), colours
-    /// that are not colours, a field a script does not have, a voice-over nobody can speak. Returns what was changed;
+    /// that are not colours, a field a script does not have, a voice-over nobody can speak, an address on screen written as a
+    /// link (https://www.site.com/#/home reads site.com). Returns what was changed;
     /// what cannot be repaired safely (a text over its limit, a missing file) is left for the checks to name.
     /// </summary>
     internal static List<string> Repair(JsonObject script, VideoCatalog cat, AiOptions ai)
@@ -568,6 +569,7 @@ public sealed class MakeVideoTool : IVisualTool
             if (sc["params"] is JsonObject pz)
                 foreach (var (name, p) in block.Params)
                     if (pz[name] is { } v) Coerce(pz, name, p.Type, fixes, $"{label}.params.{name}", p);
+            TidyAddresses(sc, block, fixes, label);
             if (sc["files"] is JsonObject files)
                 foreach (var slotName in files.Select(kv => kv.Key).ToList())
                 {
@@ -586,6 +588,49 @@ public sealed class MakeVideoTool : IVisualTool
         }
         return fixes;
     }
+
+    // A web address in a text: a domain with a letters-only ending, then maybe a port and a path, a query, a fragment (not an
+    // e-mail's domain, not the *emphasis* around it). On screen it reads the way people type it: "photovideoeditor.com/app/#/home"
+    // did not fit a title card's label, and a step showed the #/route (2026-10-09).
+    private static readonly Regex Address = new(
+        @"(?<![\w@./-])(?:https?://)?(?:www\.)?((?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:/[\w\-./%~+=&!$:@]*)?)(?:[?#][\w\-./%~+=&!$:@#?]*)?",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary><paramref name="said"/> with each address in it without https://, www., its query, its #route and its closing
+    /// slash, or null when there is none or it already reads that way. The path stays: github.com/owner/repo means the repo.</summary>
+    internal static string? Shown(string said)
+    {
+        var shown = Address.Replace(said, m => m.Groups[1].Value.TrimEnd('/'));
+        return shown == said ? null : shown;
+    }
+
+    // the addresses in a scene's line and in its texts and lists shown on screen, the way people type them
+    private static void TidyAddresses(JsonObject sc, VideoCatalog.Block block, List<string> fixes, string label)
+    {
+        if (Str(sc["line"]) is { } line && Shown(line) is { } l) { sc["line"] = l; fixes.Add($"{label}.line: the address reads \"{l}\""); }
+        if (sc["params"] is not JsonObject ps) return;
+        foreach (var (name, p) in block.Params)
+        {
+            if (OpensAddress(name)) continue;
+            if (p.Type == "string" && Str(ps[name]) is { } said && Shown(said) is { } shown)
+            {
+                ps[name] = shown;
+                fixes.Add($"{label}.params.{name}: \"{said}\" is shown as \"{shown}\"");
+            }
+            else if (p.Type == "list" && ps[name] is JsonArray items)
+                for (int k = 0; k < items.Count; k++)
+                    if (Str(items[k]) is { } item && Shown(item) is { } tidy)
+                    {
+                        items[k] = tidy;
+                        fixes.Add($"{label}.params.{name}[{k}]: \"{item}\" is shown as \"{tidy}\"");
+                    }
+        }
+    }
+
+    // a param the block opens or reads as an address (a screen's url) or finds on the page (its target): kept as written
+    private static bool OpensAddress(string name) =>
+        name is "target" or "links" || name.Contains("url", StringComparison.OrdinalIgnoreCase) || name.Contains("href", StringComparison.OrdinalIgnoreCase)
+        || name.Contains("src", StringComparison.OrdinalIgnoreCase);
 
     // the format named the way people say it
     private static string? FormatOf(string said) => Regex.Replace(said.ToLowerInvariant(), @"[\s_-]+", "") switch

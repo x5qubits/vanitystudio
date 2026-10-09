@@ -184,8 +184,26 @@ public sealed class VideoJobs : IDisposable
         if (_loop is not null) return;
         StudioOps.OwnProcess ??= ChildJob.Own;
         StudioOps.Resume(line => { Log.Info(line); OnRenderLog?.Invoke(line); });
+        // one session works a folder's jobs: a second one queues into the same store and the first one makes them
+        // (two sessions on one folder prepared and shipped the same job twice)
+        try
+        {
+            Directory.CreateDirectory(_store.Dir);
+            _folderLock = new FileStream(Path.Combine(_store.Dir, ".session.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (IOException)
+        {
+            Passive = true;
+            Log.Info("[video] another Vanity Studio session works the jobs of " + _project.Root);
+            return;
+        }
         _loop = Task.Run(LoopAsync);
     }
+
+    private FileStream? _folderLock;
+
+    /// <summary>Another session works this folder's jobs: this one queues them and that one makes them.</summary>
+    public bool Passive { get; private set; }
 
     public void Wake() { try { _wake.Release(); } catch (SemaphoreFullException) { } }
 
@@ -974,5 +992,6 @@ public sealed class VideoJobs : IDisposable
     public void Dispose()
     {
         try { _cts.Cancel(); } catch { }
+        try { _folderLock?.Dispose(); } catch { }
     }
 }

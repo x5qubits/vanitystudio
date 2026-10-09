@@ -126,6 +126,9 @@ namespace VanityStudio.Video
                     foreach (var j in found)
                     {
                         if (_jobs.ContainsKey(j.Id)) continue;
+                        // another Vanity Studio that is still running works this one: it is not this process's to restart
+                        if (j.State is "queued" or "running" && OwnedElsewhere(j.Owner)) continue;
+                        if (j.State is "queued" or "running") j.Owner = Self;
                         _jobs[j.Id] = j;
                         _seq = Math.Max(_seq, j.Seq);
                     }
@@ -154,7 +157,7 @@ namespace VanityStudio.Video
         // ── a job: in memory and in studio-jobs\<job>\job.json ─────────────────
         private sealed class Job
         {
-            public string Id, State = "queued", Stage = "", Error, Name = "video", StudioUrl, Kind = "script";
+            public string Id, State = "queued", Stage = "", Error, Name = "video", StudioUrl, Kind = "script", Owner;
             public int Pct, Position;
             public long Seq;
             public DateTime Created;
@@ -169,7 +172,7 @@ namespace VanityStudio.Video
                 var o = new JsonObject
                 {
                     ["job"] = Id, ["state"] = State, ["stage"] = Stage, ["pct"] = Pct, ["position"] = Position, ["error"] = Error,
-                    ["name"] = Name, ["studio_url"] = StudioUrl, ["kind"] = Kind, ["seq"] = Seq,
+                    ["name"] = Name, ["studio_url"] = StudioUrl, ["kind"] = Kind, ["owner"] = Owner, ["seq"] = Seq,
                     ["created"] = Created.ToString("o", CultureInfo.InvariantCulture),
                     ["started"] = Started?.ToString("o", CultureInfo.InvariantCulture),
                     ["finished"] = Finished?.ToString("o", CultureInfo.InvariantCulture),
@@ -192,7 +195,7 @@ namespace VanityStudio.Video
                 var j = new Job
                 {
                     Id = id, State = S("state") ?? "queued", Stage = S("stage") ?? "", Error = S("error"),
-                    Name = S("name") ?? "video", StudioUrl = S("studio_url"), Kind = S("kind") ?? "script",
+                    Name = S("name") ?? "video", StudioUrl = S("studio_url"), Kind = S("kind") ?? "script", Owner = S("owner"),
                     Pct = (int)D("pct"), Position = (int)D("position"), Seq = (long)D("seq"),
                     Created = T("created") ?? DateTime.UtcNow, Started = T("started"), Finished = T("finished"),
                     Bytes = (long)D("bytes"), Duration = D("duration"), Seconds = D("seconds"),
@@ -414,7 +417,7 @@ namespace VanityStudio.Video
                 if (again != null && IsLive(again.State)) return Brief(again);
                 // both files on disk before the job is in line: a start that could not be saved is an error, not a job
                 WriteAtomic(Path.Combine(dir, kind == "doc" ? "doc.json" : "script.json"), script.ToJsonString(FileJson));
-                var job = new Job { Id = id, Name = name, StudioUrl = studio, Kind = kind, Created = DateTime.UtcNow, Seq = NextSeq(), Position = _queue.Count + 1 };
+                var job = new Job { Id = id, Name = name, StudioUrl = studio, Kind = kind, Owner = Self, Created = DateTime.UtcNow, Seq = NextSeq(), Position = _queue.Count + 1 };
                 WriteAtomic(Path.Combine(dir, "job.json"), job.ToJson().ToJsonString(FileJson));
                 _jobs[id] = job;
                 _queue.Add(id);
@@ -1907,6 +1910,8 @@ try {
                 {
                     var tail = Path.GetFileName(dir).Substring(ProfilePrefix.Length);
                     if (!IsJobId(tail) || busy.Contains(tail)) continue;   // a job this process is running right now
+                    // a browser of another Vanity Studio that is still running (its job, a capture, a probe) is its own
+                    if (OwnedElsewhere(ReadText(Path.Combine(dir, OwnerFile))) || OwnedElsewhere(LoadJob(Path.Combine(Root, tail))?.Owner)) continue;
                     bool legacy = tail.Length == 10 && tail.All(Uri.IsHexDigit);
                     // not a browser profile: the harness's job root and other folders that only share the name
                     if (!legacy && !File.Exists(Path.Combine(dir, "DevToolsActivePort")) && !File.Exists(Path.Combine(dir, "Local State"))) continue;
@@ -1918,6 +1923,38 @@ try {
             catch { }
             if (closed > 0 || folders > 0) log?.Invoke($"[studio] closed {closed} leftover browser(s), removed {folders} profile folder(s)");
             return closed;
+        }
+
+        // ── which Vanity Studio a job or a browser belongs to ──────────────────────────────────────────────────
+        // Every session on this computer shares the job folder and the temp folder. A session that started while another
+        // was rendering took that session's jobs as cut off, rendered them a second time into the same folder, and
+        // closed its browsers (2026-10-09). So each job and each browser profile names its process (its id and its start
+        // time, since Windows reuses ids), and nothing owned by another live process is touched.
+        private const string OwnerFile = "vanity-owner.txt";
+        private static readonly string Self = OwnerOf(Process.GetCurrentProcess());
+
+        private static string OwnerOf(Process p)
+        {
+            try { return p.Id + ":" + p.StartTime.ToUniversalTime().Ticks; } catch { return p.Id + ":0"; }
+        }
+
+        /// <summary>Whether <paramref name="owner"/> is another Vanity Studio process that is still running.</summary>
+        private static bool OwnedElsewhere(string owner)
+        {
+            if (string.IsNullOrWhiteSpace(owner) || owner == Self) return false;
+            var parts = owner.Trim().Split(':');
+            if (parts.Length != 2 || !int.TryParse(parts[0], out var pid) || !long.TryParse(parts[1], out var ticks)) return false;
+            try
+            {
+                using var p = Process.GetProcessById(pid);
+                return Math.Abs(p.StartTime.ToUniversalTime().Ticks - ticks) < TimeSpan.TicksPerSecond;
+            }
+            catch { return false; }   // gone: a leftover
+        }
+
+        private static string ReadText(string path)
+        {
+            try { return File.Exists(path) ? File.ReadAllText(path) : null; } catch { return null; }
         }
 
         // asks the browser that owns this profile folder to close, then removes the folder
@@ -1990,6 +2027,8 @@ try {
             private async Task LaunchAsync(CancellationToken ct)
             {
                 if (!_keep) CloseProfile(Profile);   // every run gets a fresh profile; one a stopped run left is closed first
+                // the profile names its process, so another session never takes it for a leftover
+                try { Directory.CreateDirectory(Profile); File.WriteAllText(Path.Combine(Profile, OwnerFile), Self); } catch { }
                 _port = FreePort();
                 var psi = new ProcessStartInfo(Exe)
                 {
