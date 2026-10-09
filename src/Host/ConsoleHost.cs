@@ -16,7 +16,7 @@ namespace VanityStudio.Host;
 /// agent does while it works.</summary>
 public sealed class ConsoleHost
 {
-    private const string Version = "1.0.0";
+    private const string Version = "1.0.1";
 
     private readonly Options _o;
     private string _workspace;
