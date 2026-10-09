@@ -171,7 +171,9 @@ public sealed class LlmRouter : ILlmClient
         AddLayer(layer);
         if (!layer.Equals("orchestrator", StringComparison.OrdinalIgnoreCase)) AddLayer("orchestrator");
         AddLayer("any");
-        foreach (var p in _opts.Profiles.Where(IsUsable))   // last resort: ANY usable profile, regardless of layer tag
+        // last resort: ANY usable profile, regardless of layer tag, except one kept for media only (an API key added to
+        // speak the lines must not answer the chat, and bill for it, when the login is busy)
+        foreach (var p in _opts.Profiles.Where(p => IsUsable(p) && !MediaOnly(p)))
             if (seenNames.Add(p.Name)) candidates.Add(p);
         if (candidates.Count == 0) throw new InvalidOperationException("No enabled AI profiles configured.");
 
@@ -444,6 +446,13 @@ public sealed class LlmRouter : ILlmClient
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { pinned };
         return new[] { pinned }.Concat(after.Where(m => m.Length > 0 && seen.Add(m))).ToArray();
     }
+
+    /// <summary>The roles a profile can hold for media only: the voice-over, pictures, clips.</summary>
+    internal static readonly string[] MediaLayers = ["voice", "photo_gen", "product_gen", "image_gen", "image", "video_gen"];
+
+    /// <summary>A profile that only makes media: never asked to chat, not even as the last resort.</summary>
+    internal static bool MediaOnly(AiProfile p) =>
+        p.Layers.Length > 0 && p.Layers.All(l => MediaLayers.Contains(l, StringComparer.OrdinalIgnoreCase));
 
     private List<AiProfile> GetCandidates(string layer) =>
         _opts.Profiles.Where(p => IsUsable(p) && p.Layers.Contains(layer, StringComparer.OrdinalIgnoreCase)).ToList();

@@ -724,13 +724,9 @@ public sealed class ConsoleHost
         }
     }
 
-    private string? ActiveModel()
-    {
-        var p = _opts.Profiles.FirstOrDefault(Usable);
-        return p is null ? null : p.Models.FirstOrDefault();
-    }
+    private string? ActiveModel() => ActiveProfile()?.Models.FirstOrDefault();
 
-    private AiProfile? ActiveProfile() => _opts.Profiles.FirstOrDefault(Usable);
+    private AiProfile? ActiveProfile() => _opts.Profiles.FirstOrDefault(p => Usable(p) && !LlmRouter.MediaOnly(p));
 
     /// <summary>The memory block for this request: the notes whole when the store is small, a model-filtered
     /// selection when it is large. Waits briefly for the previous turn's analysis so its facts are included.</summary>
@@ -880,7 +876,7 @@ public sealed class ConsoleHost
         if (VideoText.HasFfprobe()) Okay("ffprobe: found (voice lines are measured exactly)");
         else Warn("ffprobe: not found", "voice lines are measured from their WAV header; install ffmpeg for MP3 voices");
         _opts = AgentConfig.Load();
-        var chat = _opts.Profiles.FirstOrDefault(Usable);
+        var chat = ActiveProfile();
         if (chat is null) Bad("no AI profile to write scripts", "vanity-studio --login antigravity (or /login, /key in the chat)");
         else Okay($"scripts: {chat.Name} ({chat.Provider}/{chat.Models.FirstOrDefault()})");
         PrintRoles(indent: "  ");
@@ -927,6 +923,8 @@ public sealed class ConsoleHost
         var voice = VoiceMaker.Candidates(_opts);
         var stills = ImageMaker.Candidates(_opts);
         var clips = ClipMaker.Candidates(_opts);
+        var chat = ActiveProfile();
+        Console.WriteLine(indent + "chat   (the agent thinks)    " + (chat is null ? "none: /login or /key" : $"{chat.Name} ({chat.Provider}/{ActiveModel()})"));
         Console.WriteLine(indent + "voice  (\"voice\": true)      " + (voice.Count > 0 ? string.Join(" → ", voice.Select(v => $"{v.Name} ({v.ProviderId}/{v.Model})")) : "none: /voice <profile> on a Gemini, OpenAI or Alibaba API-key profile"));
         Console.WriteLine(indent + "stills ({\"make\":\"still\"})   " + (stills.Count > 0 ? string.Join(" → ", stills.Select(p => $"{p.Name} ({p.Provider})")) : "none: an OpenAI profile (key or login), the Antigravity login or an Alibaba key"));
         Console.WriteLine(indent + "clips  ({\"make\":\"clip\"})    " + (clips.Count > 0 ? string.Join(" → ", clips.Select(c => $"{c.Name} ({c.Model})")) : "none: /key alibaba (DashScope) or DASHSCOPE_API_KEY"));
@@ -1264,7 +1262,11 @@ public sealed class ConsoleHost
         var p = opts.Profiles.FirstOrDefault(x => x.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
         if (p is null) { Red($"  no profile '{name}' (/profiles lists them; /key adds one)"); return; }
         if (!p.Layers.Contains(layer, StringComparer.OrdinalIgnoreCase)) p.Layers = p.Layers.Concat([layer]).ToArray();
-        if (!p.Layers.Contains("any", StringComparer.OrdinalIgnoreCase) && layer != "any") p.Layers = p.Layers.Concat(["any"]).ToArray();
+        // While another profile chats, this one keeps to media: the key added for the voice never answers the chat (and
+        // bills for it) when the login is busy. A profile that is the only one that can chat keeps chatting.
+        var otherChats = opts.Profiles.Any(o => !ReferenceEquals(o, p) && Usable(o) && o.Layers.Contains("any", StringComparer.OrdinalIgnoreCase));
+        if (otherChats) p.Layers = p.Layers.Where(l => !l.Equals("any", StringComparison.OrdinalIgnoreCase)).ToArray();
+        else if (!p.Layers.Contains("any", StringComparer.OrdinalIgnoreCase)) p.Layers = p.Layers.Concat(["any"]).ToArray();
         if (rest.ElementAtOrDefault(1) is { Length: > 0 } model) p.RoleModels[layer] = model;
         AgentConfig.Save(opts);
         _opts = AgentConfig.Load();

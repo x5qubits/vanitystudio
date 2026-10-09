@@ -20,7 +20,8 @@ public static class ImageMaker
     {
         var enabled  = (ai.Profiles ?? []).Where(p => p.Enabled && CanDraw(p)).ToList();
         var tagged   = enabled.Where(p => p.Layers.Any(l => ImageLayers.Contains(l, StringComparer.OrdinalIgnoreCase))).ToList();
-        var anyLayer = enabled.Where(p => !tagged.Contains(p) && p.Layers.Any(l => string.Equals(l, "any", StringComparison.OrdinalIgnoreCase))).ToList();
+        // untagged: a chat profile, or a key kept for media only (an OpenAI key given the voice still draws)
+        var anyLayer = enabled.Where(p => !tagged.Contains(p) && (p.Layers.Any(l => string.Equals(l, "any", StringComparison.OrdinalIgnoreCase)) || LlmRouter.MediaOnly(p))).ToList();
         return tagged.Concat(anyLayer).ToList();
     }
 
