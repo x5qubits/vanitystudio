@@ -1,8 +1,8 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using VanityAgent.Infra;
+using VanityStudio.Infra;
 
-namespace VanityAgent.Memory;
+namespace VanityStudio.Memory;
 
 /// <summary>The smart memory: after every turn that used tools, one model call reads the task, the reply and the
 /// numbered steps and records what those steps' RESULTS established about the project (where things live, what

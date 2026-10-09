@@ -1,6 +1,6 @@
-using VanityAgent.Llm;
+using VanityStudio.Llm;
 
-namespace VanityAgent.Tools;
+namespace VanityStudio.Tools;
 
 public sealed class ToolRegistry : IToolRegistry
 {

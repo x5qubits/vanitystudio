@@ -1,6 +1,6 @@
-using VanityAgent.Llm;
+using VanityStudio.Llm;
 
-namespace VanityAgent.Tools;
+namespace VanityStudio.Tools;
 
 public interface ITool
 {

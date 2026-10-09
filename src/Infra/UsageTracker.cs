@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace VanityAgent.Infra;
+namespace VanityStudio.Infra;
 
 /// <summary>
 /// Persists cumulative LLM token usage to {workspace}/.vanity/usage.json.

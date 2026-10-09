@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text;
 
-namespace VanityAgent.Infra;
+namespace VanityStudio.Infra;
 
 /// <summary>Process-wide diagnostic log. Lines are queued and flushed to one file under the agent's home folder
 /// (see <see cref="AgentConfig.LogsDir"/>); with <see cref="Verbose"/> they are echoed to the console too.</summary>

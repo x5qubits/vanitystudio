@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
-namespace VanityAgent.Infra;
+namespace VanityStudio.Infra;
 
 /// <summary>
 /// Ties every child process the agent starts (php -S, the persistent shell, tool commands, the headless browser) to

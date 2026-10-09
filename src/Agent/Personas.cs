@@ -1,7 +1,7 @@
 using System.Text;
-using VanityAgent.Infra;
+using VanityStudio.Infra;
 
-namespace VanityAgent.Agent;
+namespace VanityStudio.Agent;
 
 /// <summary>A persona: a markdown file with YAML frontmatter whose body replaces the agent's identity. Frontmatter:
 /// <c>name</c>, <c>description</c>, <c>tools</c> (the only tools it may use), <c>skills</c> (loaded up front),
@@ -73,10 +73,10 @@ public static class FrontmatterParser
 }
 
 /// <summary>The personas and skills available to a workspace: the global ones under the agent home and the project's
-/// own under <c>&lt;workspace&gt;/.vanity-agent</c>, project files overriding global ones by name.</summary>
+/// own under <c>&lt;workspace&gt;/.vanity-studio</c>, project files overriding global ones by name.</summary>
 public sealed class PromptLibrary
 {
-    public const string ProjectFolder = ".vanity-agent";
+    public const string ProjectFolder = ".vanity-studio";
 
     public IReadOnlyList<PersonaDefinition> Personas { get; }
     public IReadOnlyList<SkillDefinition>   Skills   { get; }
@@ -163,8 +163,9 @@ public sealed class PromptLibrary
 
     // ── scaffolding ───────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Creates <c>&lt;workspace&gt;/.vanity-agent</c> with an instructions file, an example persona and an
-    /// example skill. Existing files are left alone. Returns what was created.</summary>
+    /// <summary>Sets a folder up as a video project: <c>&lt;workspace&gt;/.vanity-studio</c> with the instructions file,
+    /// the brand (brand.json, brand.md), example personas and skills, and an empty <c>media/</c> for the operator's
+    /// pictures and clips. Existing files are left alone. Returns what was created.</summary>
     public static string Scaffold(string workspace)
     {
         var dir = ProjectDir(workspace);
@@ -178,16 +179,21 @@ public sealed class PromptLibrary
             created.Add(rel.Replace('\\', '/'));
         }
         Put("instructions.md", InstructionsTemplate);
-        Put(Path.Combine("personas", "reviewer.md"), ReviewerPersona);
-        Put(Path.Combine("personas", "writer.md"), WriterPersona);
-        Put(Path.Combine("skills", "code-review.md"), CodeReviewSkill);
-        Put(Path.Combine("skills", "commit-message.md"), CommitMessageSkill);
+        Put("brand.json", BrandJsonTemplate);
+        Put("brand.md", BrandMdTemplate);
+        Put(Path.Combine("personas", "ads.md"), AdsPersona);
+        Put(Path.Combine("personas", "tutorials.md"), TutorialsPersona);
+        Put(Path.Combine("skills", "scroll-stopping-hooks.md"), HooksSkill);
+        Put(Path.Combine("skills", "logo-reveal.md"), LogoRevealSkill);
+        Put(Path.Combine("skills", "footage-cut.md"), FootageCutSkill);
+        var media = Path.Combine(workspace, "media");
+        if (!Directory.Exists(media)) { Directory.CreateDirectory(media); created.Add("../media/"); }
         return created.Count == 0
             ? $"{ProjectFolder}/ already has every example file; nothing created."
-            : $"created in {ProjectFolder}/: " + string.Join(", ", created);
+            : $"created in {ProjectFolder}/: " + string.Join(", ", created) + ". Fill in brand.json and brand.md (or tell Vanity about the brand), put your logo and pictures in media/.";
     }
 
-    /// <summary>The same examples under the agent home, so every workspace has them.</summary>
+    /// <summary>The example personas and skills under the studio home, so every folder has them.</summary>
     public static string ScaffoldGlobal()
     {
         var created = new List<string>();
@@ -199,84 +205,138 @@ public sealed class PromptLibrary
             File.WriteAllText(path, content.Replace("\r\n", "\n"), new UTF8Encoding(false));
             created.Add(rel.Replace('\\', '/'));
         }
-        Put(Path.Combine("personas", "reviewer.md"), ReviewerPersona);
-        Put(Path.Combine("skills", "code-review.md"), CodeReviewSkill);
-        Put(Path.Combine("skills", "commit-message.md"), CommitMessageSkill);
+        Put(Path.Combine("personas", "ads.md"), AdsPersona);
+        Put(Path.Combine("skills", "scroll-stopping-hooks.md"), HooksSkill);
+        Put(Path.Combine("skills", "logo-reveal.md"), LogoRevealSkill);
+        Put(Path.Combine("skills", "footage-cut.md"), FootageCutSkill);
         return created.Count == 0 ? "nothing created." : "created: " + string.Join(", ", created);
     }
 
     private const string InstructionsTemplate = """
         # Project instructions
 
-        Read by the agent on every turn. Keep it short and factual: what the project is, how to build and test it,
-        the conventions to follow, what not to touch.
+        Read by Vanity Studio on every turn. Keep it short and factual: what these videos are for, where they are
+        posted, what every video must or must not do.
 
-        ## Build and test
+        ## Videos here
 
-        - build: `...`
-        - test: `...`
-        - run: `...`
+        - for: (Instagram reels / YouTube / the website / ads)
+        - format: (reel unless said otherwise)
+        - language: (en)
 
-        ## Conventions
+        ## Always
 
+        - end on the offer or the site
         - ...
 
-        ## Do not touch
+        ## Never
 
         - ...
         """;
 
-    private const string ReviewerPersona = """
-        ---
-        name: reviewer
-        description: Reviews changes for correctness and risk, reports findings, never edits files.
-        tools: [read_file, grep, glob, bash, web_fetch, skill_view, memory, task_scratchpad]
-        skills: [code-review]
-        max_turns: 40
-        ---
-        You are a meticulous code reviewer. You read the change and the code around it, run the build and the tests when
-        they exist, and report what is wrong, ranked by severity, each finding with the file, the line and the concrete
-        failure it causes. You do not edit files and you do not propose rewrites of what works. When nothing is wrong,
-        you say so in one line.
+    private const string BrandJsonTemplate = """
+        {
+          "name": "",
+          "url": "",
+          "logo": "media/logo.png",
+          "colors": [],
+          "language": "en"
+        }
         """;
 
-    private const string WriterPersona = """
-        ---
-        name: writer
-        description: Writes and edits documentation, READMEs and release notes from what the code actually does.
-        skills: []
-        ---
-        You are a technical writer. You document what the code does, verified by reading it, in short plain sentences:
-        one idea per sentence, no marketing, no emojis. You keep the project's existing structure and tone, and you ask
-        the code, not your memory, when a detail matters.
+    private const string BrandMdTemplate = """
+        # The brand
+
+        ## What it sells
+
+        - (the product or service, in one line)
+        - (prices and offers that may be named in a video)
+
+        ## Who buys it
+
+        - (who watches the videos: their situation, their pain, their wish)
+
+        ## Voice
+
+        - (how it speaks: plain / playful / premium / ...)
+        - words to use:
+        - words to avoid:
         """;
 
-    private const string CodeReviewSkill = """
+    private const string AdsPersona = """
         ---
-        name: code-review
-        description: How to review a diff or a pull request and how to report the findings.
+        name: ads
+        description: A direct-response ad maker - short reels that sell one offer, with A/B takes.
+        skills: [scroll-stopping-hooks]
+        max_turns: 60
         ---
-        # Code review
-
-        1. Get the change: `git diff`, `git diff --staged`, or `git diff <base>...HEAD`; `git log --oneline -10` for context.
-        2. For every changed function, read the callers (grep the name) before judging the change.
-        3. Check, in this order: wrong behaviour on real inputs; error handling and resource cleanup; concurrency;
-           security (injection, secrets, paths); performance on large inputs; missing or misleading tests.
-        4. Run the build and the tests when the project has them; quote the real output.
-        5. Report: one finding per bullet, most severe first, `path:line`, what happens and with which input.
-           Style remarks go last, under their own heading, or not at all.
+        You make performance ads: 15 to 25 second reels that sell ONE offer to ONE kind of viewer. Before any script you
+        name the viewer, their pain or wish, and the change the offer brings, from the brand. The first scene shows the
+        viewer's own situation in at most five big words; every scene after it shows a picture of what it says; the last
+        scene is the offer with its button. You render two or three takes when the operator will test them, and you
+        never invent a price, a discount or a claim the brand does not state.
         """;
 
-    private const string CommitMessageSkill = """
+    private const string TutorialsPersona = """
         ---
-        name: commit-message
-        description: Writing a commit message for the staged changes.
+        name: tutorials
+        description: A tutorial maker - how-to videos of a website or an app, step by step, with real screens.
+        max_turns: 80
         ---
-        # Commit message
+        You make tutorials. You never guess a step: you open the site with make_video action=site, click through it
+        exactly as a viewer would, and every step of the video is a screen-demo scene with the url, the clicks and the
+        target words that site listed. One step per scene, the line says what to do in the operator's language, voice
+        on. When the steps sit behind a login, the operator logs in once with /site-login and the steps use login=true.
+        """;
 
-        - Read `git diff --staged`; never describe what was not staged.
-        - First line: imperative, under 72 characters, what the change does ("Add retry to the upload client").
-        - Blank line, then why it was needed and anything a reader would not guess from the diff.
-        - No ticket numbers unless the project uses them; no emojis.
+    private const string HooksSkill = """
+        ---
+        name: scroll-stopping-hooks
+        description: The first two seconds of a reel or an ad - openings that stop the scroll.
+        ---
+        # Scroll-stopping hooks
+
+        The first scene decides whether anyone sees the second. Pick one:
+
+        1. The viewer's situation, in their words: "Still *invoicing* by hand?" over a picture of exactly that.
+        2. The result first: the finished thing (the clean room, the new site, the plated dish), then how.
+        3. A number that surprises: "*3* minutes, not 3 days." The figure is the biggest thing on screen.
+        4. A contrast: before and after in one frame (picture-split or compare blocks).
+        5. A direct question the viewer answers "yes" to in their head.
+
+        Rules: at most five words on screen, one *marked* word, a picture (never a plain card) under it, and no logo in
+        the first scene; the logo belongs to the last.
+        """;
+
+    private const string LogoRevealSkill = """
+        ---
+        name: logo-reveal
+        description: A 3 to 6 second logo reveal or intro / outro sting.
+        ---
+        # Logo reveal
+
+        - One or two scenes, no voice, music on (a short bed or auto), format as asked (square for a profile, landscape
+          for a YouTube intro, reel for stories).
+        - The brand's logo is media:logo; check it exists with brand read first. Without a logo, the brand's name in
+          the brand's colours is the reveal.
+        - A line only when the request names a tagline; at most six words.
+        - Offer two takes when the operator has not chosen a style.
+        """;
+
+    private const string FootageCutSkill = """
+        ---
+        name: footage-cut
+        description: A video cut from the operator's own clips - trims, order, titles, music - with edit_video.
+        ---
+        # Cutting the operator's footage
+
+        1. Find the clips: files list folder=videos (or desktop, downloads), or files find; files info gives each
+           clip's length. Import the ones you use into media/ when they live elsewhere.
+        2. Read edit_video action=docs once: it says how a clip names its file, where it starts in the source, how long
+           it plays, its transition, the text layers and the music.
+        3. Save a doc (edit_video action=save) with one clip per moment the operator wants, in order, titles as text
+           layers, music when asked. Keep every text short.
+        4. edit_video validate, then sheet to see the whole cut and frame at the moments that matter; fix and look again.
+        5. edit_video render; report the job number. Later changes are patches to the same doc, then render again.
         """;
 }

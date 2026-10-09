@@ -1,8 +1,8 @@
 using System.Text.Json;
-using VanityAgent.Agent;
-using VanityAgent.Llm;
+using VanityStudio.Agent;
+using VanityStudio.Llm;
 
-namespace VanityAgent.Tools;
+namespace VanityStudio.Tools;
 
 /// <summary>Loads a skill's playbook into the conversation on demand. The catalog in the system prompt names the
 /// skills; this returns the body of one.</summary>

@@ -1,9 +1,9 @@
 using System.Text;
 using System.Text.Json;
-using VanityAgent.Llm;
-using VanityAgent.Infra;
+using VanityStudio.Llm;
+using VanityStudio.Infra;
 
-namespace VanityAgent.Agent;
+namespace VanityStudio.Agent;
 
 /// <summary>
 /// Manages conversation history lifecycle, sliding windows, and token bloat control.

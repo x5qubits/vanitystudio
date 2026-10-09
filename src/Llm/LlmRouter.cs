@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
 
-namespace VanityAgent.Llm;
+namespace VanityStudio.Llm;
 
 /// <summary>
 /// Routes LLM calls to the right profile by layer, with automatic key+model retry,
@@ -47,7 +47,7 @@ public sealed class LlmRouter : ILlmClient
         {
             // Non-project (shared) AI calls: bodies go next to the exe under logs\_shared\prompts\, alongside the
             // per-project trees, so everything diagnostic lives under one logs root.
-            return _sharedCallLogger ??= new LlmCallLogger(Path.Combine(VanityAgent.Infra.AgentConfig.LogsDir, "_shared"));
+            return _sharedCallLogger ??= new LlmCallLogger(Path.Combine(VanityStudio.Infra.AgentConfig.LogsDir, "_shared"));
         }
     }
 

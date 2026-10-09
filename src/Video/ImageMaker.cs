@@ -1,278 +1,66 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats.Png;
-using SixLabors.ImageSharp.Formats.Webp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
-using VanityAgent.Llm;
-using VanityAgent.Tools;
+using VanityStudio.Llm;
 
-namespace VanityAgent.Tools;
+namespace VanityStudio.Video;
 
 /// <summary>
-/// Generate a professional image via the photo_gen/product_gen AI profile layer,
-/// resize it to the exact placeholder dimensions, and save as WebP (lossless for
-/// transparent, quality-85 lossy for opaque). Supports OpenAI (API key + OAuth),
-/// Antigravity/Gemini OAuth, and Alibaba wan.
+/// Draws a picture from a prompt (optionally from a picture to start from) through the AI profiles that can make
+/// images: OpenAI (API key, or the ChatGPT login), the Antigravity login (Gemini image models) and Alibaba wan (API
+/// key). Profiles carrying an image layer (photo_gen, product_gen, image_gen, image) come first, then every profile
+/// on the "any" layer. The video's AI stills (<c>{"make": "still"}</c>) are drawn here.
 /// </summary>
-public sealed class ImageGenTool : ITool
+public static class ImageMaker
 {
-    public ToolDefinition Definition { get; } = new()
+    private static readonly string[] ImageLayers = ["photo_gen", "product_gen", "image_gen", "image"];
+
+    /// <summary>The profiles that can draw, in the order they are tried.</summary>
+    public static List<AiProfile> Candidates(AiOptions ai)
     {
-        Name        = "image_gen",
-        Description = "Generate an image and save as WebP at exact pixel dimensions - a new picture from the prompt, or, with `reference`, a regenerated version of an existing one (same subject and composition, changed as the prompt says). Use for hero images, sliders, product shots. Never use placeholder URLs.",
-        Parameters  = new Dictionary<string, object>
-        {
-            ["type"] = "object",
-            ["properties"] = new Dictionary<string, object>
-            {
-                ["file_path"]   = new Dictionary<string, object> { ["type"] = "string",  ["description"] = "Destination .webp path (relative to working dir)." },
-                ["prompt"]      = new Dictionary<string, object> { ["type"] = "string",  ["description"] = "Visual description: subject, style, mood, lighting." },
-                ["width"]       = new Dictionary<string, object> { ["type"] = "integer", ["description"] = "Target width in pixels." },
-                ["height"]      = new Dictionary<string, object> { ["type"] = "integer", ["description"] = "Target height in pixels." },
-                ["transparent"] = new Dictionary<string, object> { ["type"] = "boolean", ["description"] = "Transparent background for logos/icons." },
-                ["alt"]         = new Dictionary<string, object> { ["type"] = "string",  ["description"] = "Alt text for the img tag." },
-                ["reference"]   = new Dictionary<string, object> { ["type"] = "string",  ["description"] = "Optional: the image to start from - a file in the project (e.g. assets/img/hero.webp, an attachment) or an http(s) image URL. The prompt then says what to change. Omit for a new picture." },
-            },
-            ["required"] = new[] { "file_path", "prompt", "width", "height" },
-        },
-    };
-
-    private readonly string _workspace;
-
-    /// <summary>The host's live profile catalog: the same objects the router uses, so a token refreshed by a chat
-    /// call is seen here and the other way round.</summary>
-    private readonly Func<AiOptions> _ai;
-
-    public ImageGenTool(string workspace, Func<AiOptions> ai) { _workspace = workspace; _ai = ai; }
-
-    public async Task<string> ExecuteAsync(string argsJson, CancellationToken ct = default)
-    {
-        using var doc  = JsonDocument.Parse(argsJson);
-        var root       = doc.RootElement;
-        var filePath   = root.TryGetProperty("file_path",   out var fp) ? fp.GetString() ?? "" : "";
-        var prompt     = root.TryGetProperty("prompt",      out var pr) ? pr.GetString() ?? "" : "";
-        var width      = root.TryGetProperty("width",       out var w)  && w.ValueKind == JsonValueKind.Number ? w.GetInt32() : 0;
-        var height     = root.TryGetProperty("height",      out var h)  && h.ValueKind == JsonValueKind.Number ? h.GetInt32() : 0;
-        var transparent= root.TryGetProperty("transparent", out var tr) && tr.ValueKind == JsonValueKind.True;
-        var alt        = root.TryGetProperty("alt",         out var al) && al.ValueKind == JsonValueKind.String ? al.GetString() : null;
-        var referenceArg = root.TryGetProperty("reference", out var rf) && rf.ValueKind == JsonValueKind.String ? rf.GetString()?.Trim() ?? "" : "";
-
-        if (!filePath.EndsWith(".webp", StringComparison.OrdinalIgnoreCase))
-            return $"Error: file_path must end with .webp (got: {filePath}).";
-        if (string.IsNullOrWhiteSpace(prompt))
-            return "Error: prompt is required.";
-        if (width <= 0 || height <= 0)
-            return "Error: width and height must be positive integers matching the placeholder.";
-        if (width > 4096 || height > 4096)
-            return "Error: max size is 4096px per side.";
-
-        string dest;
-        try { dest = VanityAgent.Infra.VanityPathHelper.NormalizeAndResolveStrict(filePath, _workspace); }
-        catch (Exception ex) { return "Error: " + ex.Message; }
-        if (VanityAgent.Infra.VanityPathHelper.IsDeniedForAgent(dest, _workspace, out var denied)) return denied;
-
-        // The picture to start from, when the request is "this image, but ...": read once, sent to the provider with
-        // the prompt. Without it a regeneration was a new, unrelated picture.
-        byte[]? reference = null;
-        if (referenceArg.Length > 0)
-        {
-            try { reference = await LoadReferenceAsync(referenceArg, ct).ConfigureAwait(false); }
-            catch (Exception ex) { return $"Error: reference '{referenceArg}' could not be read - {ex.Message}"; }
-        }
-
-        // Prevent AI-invented text/signage in photos (not needed for transparent icon renders)
-        var effectivePrompt = transparent
-            ? prompt
-            : prompt + ". No text, no signage, no lettering, no logos, no watermarks anywhere in the image.";
-        if (reference != null)
-            effectivePrompt = "Use the attached image as the reference: keep its subject and composition, and change it as follows. " + effectivePrompt;
-
-        var ai = _ai();
-        byte[]? png = null;
-        Exception? lastErr = null;
-
-        for (int attempt = 1; attempt <= 3; attempt++)
-        {
-            try
-            {
-                png = await GeneratePngAsync(effectivePrompt, width, height, transparent, ai, ct, reference).ConfigureAwait(false);
-                lastErr = null;
-                break;
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
-            {
-                lastErr = ex;
-                if (attempt < 3) await Task.Delay(attempt * 2500, ct).ConfigureAwait(false);
-            }
-        }
-
-        if (lastErr != null || png == null)
-            return $"Error: image_gen failed after 3 attempts: {lastErr?.Message ?? "no image returned"}";
-
-        // Resize to exact WxH and encode WebP
-        string outPath = dest;
-        string fmt;
-        byte[] bytes;
-        try
-        {
-            bytes = ResizeWebp(png, width, height, transparent);
-            fmt   = transparent ? "lossless WebP" : "lossy WebP q85";
-        }
-        catch
-        {
-            // WebP encode failed — fall back to PNG
-            try
-            {
-                bytes   = ResizePng(png, width, height);
-                outPath = Path.ChangeExtension(dest, ".png");
-                fmt     = "PNG (WebP unavailable on this machine)";
-            }
-            catch (Exception pngEx)
-            {
-                return $"Error: render succeeded but encoding failed: {pngEx.Message}";
-            }
-        }
-
-        var dir = Path.GetDirectoryName(outPath);
-        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        await File.WriteAllBytesAsync(outPath, bytes, ct).ConfigureAwait(false);
-
-        var kb  = Math.Max(1, bytes.Length / 1024);
-        var msg = $"Saved {outPath} ({width}x{height}, {kb} KB, {fmt}).";
-        if (!outPath.Equals(dest, StringComparison.OrdinalIgnoreCase))
-            msg += $" WebP unavailable — reference \"{outPath}\" in markup, NOT \"{dest}\".";
-        if (!string.IsNullOrWhiteSpace(alt))
-            msg += $" Suggested alt: \"{alt}\"";
-        return msg;
+        var enabled  = (ai.Profiles ?? []).Where(p => p.Enabled && CanDraw(p)).ToList();
+        var tagged   = enabled.Where(p => p.Layers.Any(l => ImageLayers.Contains(l, StringComparer.OrdinalIgnoreCase))).ToList();
+        var anyLayer = enabled.Where(p => !tagged.Contains(p) && p.Layers.Any(l => string.Equals(l, "any", StringComparison.OrdinalIgnoreCase))).ToList();
+        return tagged.Concat(anyLayer).ToList();
     }
 
-    // ── Resize + encode ──────────────────────────────────────────────────────
-
-    private static byte[] ResizeWebp(byte[] src, int w, int h, bool transparent)
+    /// <summary>Whether a profile is one of the wired image providers.</summary>
+    public static bool CanDraw(AiProfile p)
     {
-        using var img = Image.Load<Rgba32>(src);
-        img.Mutate(x => x.Resize(new ResizeOptions
-        {
-            Size     = new Size(w, h),
-            Mode     = ResizeMode.Crop,
-            Position = AnchorPositionMode.Center,
-            Sampler  = KnownResamplers.Lanczos3,
-        }));
-        var enc = new WebpEncoder
-        {
-            FileFormat = transparent ? WebpFileFormatType.Lossless : WebpFileFormatType.Lossy,
-            Quality    = transparent ? 100 : 85,
-        };
-        using var ms = new MemoryStream();
-        img.Save(ms, enc);
-        return ms.ToArray();
+        var prov = (p.Provider ?? "").Trim().ToLowerInvariant();
+        bool hasKey = p.ApiKeys.Any(k => !string.IsNullOrWhiteSpace(k) && !k.StartsWith("YOUR_", StringComparison.OrdinalIgnoreCase));
+        bool oauth = !string.IsNullOrWhiteSpace(p.OAuthAccessToken) || !string.IsNullOrWhiteSpace(p.OAuthRefreshToken);
+        return (prov == "openai" && (hasKey || oauth)) || (prov == "alibaba" && hasKey)
+            || (oauth && string.Equals(p.OAuthProvider, "antigravity", StringComparison.OrdinalIgnoreCase));
     }
 
-    private static byte[] ResizePng(byte[] src, int w, int h)
+    /// <summary>One picture from one profile, as the provider returns it (PNG, JPEG or WebP bytes). The size is a
+    /// hint: each provider draws its nearest supported size and shape.</summary>
+    public static async Task<byte[]> DrawAsync(AiProfile p, string prompt, int width, int height, CancellationToken ct, byte[]? reference = null)
     {
-        using var img = Image.Load<Rgba32>(src);
-        img.Mutate(x => x.Resize(new ResizeOptions
+        if (OAuthTokenRefresher.UsesOAuth(p))
+            await OAuthTokenRefresher.EnsureFreshAsync(p, 0, force: false, ct).ConfigureAwait(false);
+        var prov = (p.Provider ?? "").Trim().ToLowerInvariant();
+        bool hasKey = p.ApiKeys.Any(k => !string.IsNullOrWhiteSpace(k));
+        bool hasOAuth = !string.IsNullOrWhiteSpace(p.OAuthAccessToken);
+        if (prov == "openai" && hasKey)
+            return await OpenAiKeyAsync(prompt, width, height, false, p, ct, reference).ConfigureAwait(false);
+        if (prov == "openai" && hasOAuth)
         {
-            Size     = new Size(w, h),
-            Mode     = ResizeMode.Crop,
-            Position = AnchorPositionMode.Center,
-            Sampler  = KnownResamplers.Lanczos3,
-        }));
-        using var ms = new MemoryStream();
-        img.Save(ms, new PngEncoder());
-        return ms.ToArray();
-    }
-
-    /// <summary>The reference picture as PNG, at most 1536 px on its longer side (what every provider accepts): a
-    /// file inside the project, or an image on the web.</summary>
-    internal async Task<byte[]> LoadReferenceAsync(string reference, CancellationToken ct)
-    {
-        byte[] raw;
-        if (reference.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || reference.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-        {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; VanityAgent)");
-            raw = await http.GetByteArrayAsync(reference, ct).ConfigureAwait(false);
-        }
-        else
-        {
-            var full = VanityAgent.Infra.VanityPathHelper.NormalizeAndResolveStrict(reference, _workspace);
-            if (!File.Exists(full)) throw new FileNotFoundException("no such file in the project");
-            raw = await File.ReadAllBytesAsync(full, ct).ConfigureAwait(false);
-        }
-        if (raw.Length > 25 * 1024 * 1024) throw new InvalidOperationException("larger than 25 MB");
-        using var img = Image.Load<Rgba32>(raw);
-        if (Math.Max(img.Width, img.Height) > 1536)
-            img.Mutate(x => x.Resize(new ResizeOptions { Size = new Size(1536, 1536), Mode = ResizeMode.Max, Sampler = KnownResamplers.Lanczos3 }));
-        using var ms = new MemoryStream();
-        img.Save(ms, new PngEncoder());
-        return ms.ToArray();
-    }
-
-    // ── Provider routing ─────────────────────────────────────────────────────
-
-    private static async Task<byte[]> GeneratePngAsync(string prompt, int width, int height, bool transparent,
-        AiOptions ai, CancellationToken ct, byte[]? reference = null)
-    {
-        // Token persistence is wired by the host (AgentConfig); nothing to do here.
-        var imageLayers = new[] { "photo_gen", "product_gen", "image_gen", "image" };
-        // A profile that declares "any" is usable for any layer - the same order LlmRouter documents
-        // ("requested layer → orchestrator → any"). Matching only the exact layer names meant the operator's
-        // Antigravity profiles, every one of them declaring "any" and able to generate images, were never
-        // candidates: one capped photo_gen profile then failed the whole call with nothing to fall back to
-        // (2026-09-19). Tagged profiles still come FIRST; "any" is the fallback, never the preference.
-        var enabled  = (ai.Profiles ?? []).Where(p => p.Enabled).ToList();
-        var tagged   = enabled.Where(p => p.Layers.Any(l => imageLayers.Contains(l, StringComparer.OrdinalIgnoreCase))).ToList();
-        var anyLayer = enabled.Where(p => !tagged.Contains(p)
-                                       && p.Layers.Any(l => string.Equals(l, "any", StringComparison.OrdinalIgnoreCase))).ToList();
-        var candidates = tagged.Concat(anyLayer).ToList();
-
-        if (candidates.Count == 0)
-            throw new InvalidOperationException(
-                "No AI profile can generate images. Image generation works through an OpenAI profile (key or ChatGPT login), an Antigravity login, or an Alibaba key; add one with /key or /login.");
-
-        Exception? last = null;
-        foreach (var p in candidates)
-        {
-            try
+            try { return await OpenAiOAuthAsync(prompt, width, height, p, ct, reference).ConfigureAwait(false); }
+            catch (HttpRequestException ex) when (ex.Message.Contains("401"))
             {
-                // Refresh expired OAuth token before attempting image generation.
-                if (OAuthTokenRefresher.UsesOAuth(p))
-                    await OAuthTokenRefresher.EnsureFreshAsync(p, 0, force: false, ct).ConfigureAwait(false);
-
-                var prov    = (p.Provider ?? "").Trim().ToLowerInvariant();
-                bool hasKey = p.ApiKeys.Any(k => !string.IsNullOrWhiteSpace(k));
-                bool hasOAuth = !string.IsNullOrWhiteSpace(p.OAuthAccessToken);
-
-                if (prov == "openai" && hasKey)
-                    return await OpenAiKeyAsync(prompt, width, height, transparent, p, ct, reference).ConfigureAwait(false);
-                if (prov == "openai" && hasOAuth)
-                {
-                    try { return await OpenAiOAuthAsync(prompt, width, height, p, ct, reference).ConfigureAwait(false); }
-                    catch (HttpRequestException ex) when (ex.Message.Contains("401"))
-                    {
-                        // Token was valid by expiry but server rejected it — force a refresh and retry once.
-                        if (await OAuthTokenRefresher.EnsureFreshAsync(p, 0, force: true, ct).ConfigureAwait(false))
-                            return await OpenAiOAuthAsync(prompt, width, height, p, ct, reference).ConfigureAwait(false);
-                        throw;
-                    }
-                }
-                if (prov == "alibaba" && hasKey)
-                    return await AlibabaWanAsync(prompt, width, height, p, ct, reference).ConfigureAwait(false);
-                if (hasOAuth && string.Equals(p.OAuthProvider, "antigravity", StringComparison.OrdinalIgnoreCase))
-                    return await AntigravityAsync(prompt, width, height, p, ct, reference).ConfigureAwait(false);
-
-                last = new NotSupportedException($"Profile '{p.Name}' ({prov}) is not a wired image provider. Use OpenAI (key or OAuth), Gemini (Antigravity OAuth), or Alibaba.");
+                // valid by its expiry but refused: refresh once and try again
+                if (await OAuthTokenRefresher.EnsureFreshAsync(p, 0, force: true, ct).ConfigureAwait(false))
+                    return await OpenAiOAuthAsync(prompt, width, height, p, ct, reference).ConfigureAwait(false);
+                throw;
             }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { last = ex; }
         }
-        throw new InvalidOperationException(
-            "All photo_gen profiles failed. Last error: " + (last?.Message ?? "unknown"));
+        if (prov == "alibaba" && hasKey)
+            return await AlibabaWanAsync(prompt, width, height, p, ct, reference).ConfigureAwait(false);
+        if (hasOAuth && string.Equals(p.OAuthProvider, "antigravity", StringComparison.OrdinalIgnoreCase))
+            return await AntigravityAsync(prompt, width, height, p, ct, reference).ConfigureAwait(false);
+        throw new NotSupportedException($"Profile '{p.Name}' ({prov}) is not a wired image provider. Use OpenAI (key or login), the Antigravity login, or Alibaba.");
     }
 
     // ── OpenAI API key ────────────────────────────────────────────────────────

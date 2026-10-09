@@ -1,4 +1,4 @@
-namespace VanityAgent.Memory;
+namespace VanityStudio.Memory;
 
 /// <summary>A single persisted memory record — text content + optional embedding vector.</summary>
 public sealed class MemoryEntry

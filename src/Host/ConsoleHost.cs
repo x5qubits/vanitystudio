@@ -1,16 +1,19 @@
 using System.Text;
 using System.Text.Json;
-using VanityAgent.Agent;
-using VanityAgent.Auth;
-using VanityAgent.Infra;
-using VanityAgent.Llm;
-using VanityAgent.Memory;
-using VanityAgent.Tools;
+using System.Text.Json.Nodes;
+using VanityStudio.Agent;
+using VanityStudio.Auth;
+using VanityStudio.Infra;
+using VanityStudio.Llm;
+using VanityStudio.Memory;
+using VanityStudio.Tools;
+using VanityStudio.Video;
 
-namespace VanityAgent.Host;
+namespace VanityStudio.Host;
 
-/// <summary>The console: argument parsing, the first-run setup, the REPL with its slash commands, and the rendering
-/// of what the agent does while it works.</summary>
+/// <summary>The console: argument parsing, the first-run setup, the direct video commands (render, blocks, site, jobs,
+/// doctor), the chat with its slash commands, the background video jobs' progress, and the rendering of what the
+/// agent does while it works.</summary>
 public sealed class ConsoleHost
 {
     private const string Version = "1.0.0";
@@ -29,6 +32,10 @@ public sealed class ConsoleHost
     private PersonaDefinition? _persona;
     private string? _personaName;
     private readonly HashSet<string> _pinnedSkills = new(StringComparer.OrdinalIgnoreCase);
+    private StudioProject _project = null!;
+    private VideoJobs? _jobs;
+    private string _request = "";
+    private volatile bool _atPrompt;
 
     private sealed class Options
     {
@@ -39,9 +46,17 @@ public sealed class ConsoleHost
         public bool Sandbox;
         public bool Verbose;
         public bool NoMemory;
+        public bool NoWait;
         public string? Login;
+        public string? SiteLogin;
         public string? Persona;
         public bool Usage;
+        public string? Command;
+        public List<string> CommandArgs = [];
+        public string? Out;
+        public string? Format;
+        public List<string> Clicks = [];
+        public bool SiteLoginFlag;
         public List<string> Skills = [];
         public List<string> Deny = [];
         public List<string> Prompt = [];
@@ -60,20 +75,26 @@ public sealed class ConsoleHost
         };
         TaskScheduler.UnobservedTaskException += (_, e) => { try { Log.Error("UNOBSERVED: " + e.Exception); } catch { } e.SetObserved(); };
         try { Console.OutputEncoding = Encoding.UTF8; Console.InputEncoding = Encoding.UTF8; } catch { }
-        var o = Parse(args);
+        Options o;
+        try { o = Parse(args); }
+        catch (ArgumentException ex) { Console.Error.WriteLine("error: " + ex.Message); return 2; }
         if (o.Help) { PrintUsage(); return 0; }
-        if (o.ShowVersion) { Console.WriteLine("vanity-agent " + Version); return 0; }
+        if (o.ShowVersion) { Console.WriteLine("vanity-studio " + Version); return 0; }
 
         AgentConfig.EnsureDirs();
-        Log.Initialize(Path.Combine(AgentConfig.LogsDir, "vanity-agent.log"));
+        var imported = ImportOldConfig();
+        try { if (!Directory.EnumerateFiles(Path.Combine(AgentConfig.Dir, "skills"), "*.md").Any()) PromptLibrary.ScaffoldGlobal(); } catch { }
+        Log.Initialize(Path.Combine(AgentConfig.LogsDir, "vanity-studio.log"));
         Log.Verbose = o.Verbose;
-        // The per-call prompt log (logs/_shared/prompts) carries project content; VANITY_AGENT_PROMPT_LOG=0 turns it off.
-        LlmCallLogger.Enabled = Environment.GetEnvironmentVariable("VANITY_AGENT_PROMPT_LOG") is not ("0" or "false" or "off");
-        Log.Info("vanity-agent " + Version + " starting");
+        // The per-call prompt log (logs/_shared/prompts) carries project content; VANITY_STUDIO_PROMPT_LOG=0 turns it off.
+        LlmCallLogger.Enabled = Environment.GetEnvironmentVariable("VANITY_STUDIO_PROMPT_LOG") is not ("0" or "false" or "off");
+        Log.Info("vanity-studio " + Version + " starting");
         OAuthTokenRefresher.Persist = (_, p) => AgentConfig.PersistOAuth(p);
         OAuthTokenRefresher.Reload  = (_, name) => AgentConfig.ReloadProfile(name);
         VanityPathHelper.Sandbox = o.Sandbox;
         VanityPathHelper.DeniedPaths = o.Deny.ToArray();
+        StudioOps.OwnProcess = ChildJob.Own;
+        if (imported is not null) Dim("  " + imported);
 
         var host = new ConsoleHost(o);
         try
@@ -82,6 +103,24 @@ public sealed class ConsoleHost
             {
                 await host.LoginAsync(o.Login, null, CancellationToken.None);
                 return 0;
+            }
+            if (o.SiteLogin is not null) { host.SiteLoginWindow(o.SiteLogin, wait: true); return 0; }
+            // the commands that need no model
+            switch (o.Command)
+            {
+                case "blocks": return await host.BlocksAsync();
+                case "site": return await host.SiteAsync();
+                case "read": Console.WriteLine(await WebTool.ReadAsync(o.CommandArgs.FirstOrDefault() ?? "", o.Clicks, CancellationToken.None)); return 0;
+                case "doctor": return await host.DoctorAsync();
+                case "jobs": host.OpenProject(); host.PrintJobs(); return 0;
+                case "docs": return await host.ApiDocsAsync();
+                case "tool": host._opts = AgentConfig.Load(); return await host.RunToolAsync();
+            }
+            if (o.Command == "render")
+            {
+                // a script's voice lines and AI pictures need profiles; a script without them, or a doc, does not
+                host._opts = AgentConfig.Load();
+                return await host.RenderFileAsync();
             }
             if (!await host.EnsureProfilesAsync()) { HoldWindow(); return 2; }
             host.Build();
@@ -106,7 +145,22 @@ public sealed class ConsoleHost
             HoldWindow();
             return 1;
         }
-        finally { Log.Flush(); }
+        finally { host._jobs?.Dispose(); Log.Flush(); }
+    }
+
+    /// <summary>First run of Vanity Studio on a machine that has the general agent's state: its profiles (keys, logins,
+    /// settings) are copied over once, so nobody signs in twice. The old folder is left as it is.</summary>
+    private static string? ImportOldConfig()
+    {
+        try
+        {
+            if (File.Exists(AgentConfig.ConfigFile) || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("VANITY_STUDIO_HOME"))) return null;
+            var old = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".vanity-agent", "config.json");
+            if (!File.Exists(old)) return null;
+            File.Copy(old, AgentConfig.ConfigFile);
+            return $"[profiles imported from {old}]";
+        }
+        catch { return null; }
     }
 
     /// <summary>A window opened by double-clicking the exe closes the instant the process ends, taking the error
@@ -124,6 +178,8 @@ public sealed class ConsoleHost
         catch { }
     }
 
+    private static readonly string[] Commands = ["render", "blocks", "site", "read", "doctor", "jobs", "docs", "tool"];
+
     private static Options Parse(string[] args)
     {
         var o = new Options();
@@ -131,6 +187,19 @@ public sealed class ConsoleHost
         {
             var a = args[i];
             string Next() => i + 1 < args.Length ? args[++i] : throw new ArgumentException($"{a} needs a value");
+            // a direct command is the first word, and only in the form it takes (`render a reel for my shop` is a request)
+            if (i == 0 && Commands.Contains(a))
+            {
+                var rest = args.Skip(1).Where(x => !x.StartsWith('-')).ToList();
+                bool isCommand = a switch
+                {
+                    "render" => rest.Count >= 1 && rest[0].EndsWith(".json", StringComparison.OrdinalIgnoreCase),
+                    "site" or "read" => rest.Count >= 1 && Uri.TryCreate(rest[0], UriKind.Absolute, out var u) && u.Scheme is "http" or "https",
+                    "tool" => rest.Count >= 1 && rest.Count <= 2,
+                    _ => rest.Count == 0,
+                };
+                if (isCommand) { o.Command = a; continue; }
+            }
             switch (a)
             {
                 case "-h": case "--help": o.Help = true; break;
@@ -142,13 +211,20 @@ public sealed class ConsoleHost
                 case "--sandbox": o.Sandbox = true; break;
                 case "-v": case "--verbose": o.Verbose = true; break;
                 case "--no-memory": o.NoMemory = true; break;
+                case "--no-wait": o.NoWait = true; break;
                 case "--deny": o.Deny.Add(Next()); break;
                 case "--login": o.Login = Next(); break;
+                case "--site-login": o.SiteLogin = Next(); break;
                 case "--persona": o.Persona = Next(); break;
                 case "--usage": o.Usage = true; break;
                 case "--skill": o.Skills.Add(Next()); break;
+                case "-o": case "--out": o.Out = Next(); break;
+                case "--format": o.Format = Next(); break;
+                case "--click": case "--clicks": o.Clicks.AddRange(Next().Split('>', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)); break;
+                case "--logged-in": o.SiteLoginFlag = true; break;
                 case "-p": case "--print": if (i + 1 < args.Length && !args[i + 1].StartsWith('-')) o.Prompt.Add(Next()); break;
                 default:
+                    if (o.Command is not null && !a.StartsWith('-')) { o.CommandArgs.Add(a); break; }
                     if (a.StartsWith('-') && o.Prompt.Count == 0) throw new ArgumentException("unknown option " + a + " (see --help)");
                     o.Prompt.Add(a); break;
             }
@@ -159,30 +235,45 @@ public sealed class ConsoleHost
     private static void PrintUsage()
     {
         Console.WriteLine("""
-            vanity-agent - a general-purpose command-line agent
+            vanity-studio - make and edit videos from the command line with Vanity Studio (photovideoeditor.com)
 
-            usage: vanity-agent [options] [prompt...]
-
-              With a prompt (or text on stdin) it answers once and exits; without one it opens a chat in the
-              current directory. Type /help inside the chat for the commands.
+            usage:
+              vanity-studio                              chat: ask for a video, change it, look at it (/help inside)
+              vanity-studio "<request>"                  one request, then wait for its videos and exit
+              vanity-studio render <script.json|doc.json> [-o dir]
+                                                         render a video script or a Studio project without a chat
+              vanity-studio blocks                       the Studio's scene blocks (what a script can use)
+              vanity-studio read <url> [--click "A"]      what a page says: title, prices, product data, text, pictures
+              vanity-studio site <url> [--click "A > B"] [--format reel] [--logged-in]
+                                                         what a web page shows, as a tutorial step names it
+              vanity-studio jobs                         the video jobs of this folder
+              vanity-studio docs                         the Studio's video API reference (the project doc format)
+              vanity-studio doctor                       check the browser, the Studio, ffprobe and the AI profiles
+              vanity-studio tool <name> '<json>'         run one tool without a model (make_video, edit_video, files, brand,
+                                                         read_file, memory), e.g. tool edit_video '{"action":"open","source":"3"}'
 
             options:
-              -C, --cwd <dir>        work in <dir> instead of the current directory
+              -C, --cwd <dir>        work in <dir> (the project folder) instead of the current directory
               -P, --profile <name>   use this AI profile first (see /profiles)
               -m, --model <model>    use this model on the active profile for this run
+              --no-wait              with a request: exit without waiting for the videos (they resume on the next run)
               --max-turns <n>        tool-call turns one request may take (default 60)
-              --sandbox              confine the file tools to the working directory
-              --deny <path>          a folder the agent must not touch (repeatable)
+              --sandbox              only files inside the project folder may be used
+              --deny <path>          a folder that must not be touched (repeatable)
               --no-memory            do not load or save project memory notes
               --login <provider>     sign in and exit: openai | grok | antigravity | anthropic
-              --usage                show what is left on each login (weekly / five-hour limits) and what this project spent, then exit
-              --persona <name>       run as a persona from .vanity-agent/personas or ~/.vanity-agent/personas
+              --site-login <url>     open the login browser at <url>: log in to a site once for tutorial steps behind a login
+              --usage                what is left on each login and what this project spent, then exit
+              --persona <name>       run as a persona from .vanity-studio/personas or ~/.vanity-studio/personas
               --skill <name>         pin a skill for the session (repeatable)
               -v, --verbose          echo the diagnostic log to the console
               -V, --version          print the version
               -h, --help             this text
 
-            state lives in %USERPROFILE%\.vanity-agent (VANITY_AGENT_HOME overrides it).
+            a project folder holds media/ (your pictures and clips), videos/ (finished videos), edits/ (projects being
+            edited) and .vanity-studio/ (brand.json, brand.md, instructions, personas, skills, jobs, memory).
+            state lives in %USERPROFILE%\.vanity-studio (VANITY_STUDIO_HOME overrides it); VANITY_STUDIO_URL points at
+            another Studio.
             """);
     }
 
@@ -202,12 +293,13 @@ public sealed class ConsoleHost
         if (_opts.Profiles.Any(Usable)) return true;
         if (Console.IsInputRedirected)
         {
-            Console.Error.WriteLine($"No AI profile configured. Run `vanity-agent` interactively once, or `vanity-agent --login openai`, or create {AgentConfig.ConfigFile} (see config.example.json).");
+            Console.Error.WriteLine($"No AI profile configured. Run `vanity-studio` interactively once, or `vanity-studio --login antigravity`, or create {AgentConfig.ConfigFile} (see config.example.json).");
             return false;
         }
         Dim("");
-        Cyan("  Welcome to vanity-agent. No AI provider is configured yet.");
+        Cyan("  Welcome to Vanity Studio. No AI provider is configured yet.");
         Dim($"  Config: {AgentConfig.ConfigFile}");
+        Dim("  The model writes the video scripts; voice, AI pictures and AI clips use API-key profiles (see /roles after setup).");
         Dim("");
         var ok = await SetupWizardAsync(CancellationToken.None);
         _opts = AgentConfig.Load();
@@ -220,14 +312,14 @@ public sealed class ConsoleHost
     private async Task<bool> SetupWizardAsync(CancellationToken ct)
     {
         Console.WriteLine("  How do you want to connect?");
-        Console.WriteLine("    1  OpenAI       - sign in with ChatGPT (subscription, device code)");
-        Console.WriteLine("    2  OpenAI       - API key");
-        Console.WriteLine("    3  Anthropic    - API key or token");
-        Console.WriteLine("    4  Google       - Antigravity sign in (subscription, browser)");
-        Console.WriteLine("    5  Gemini       - API key");
+        Console.WriteLine("    1  Google       - Antigravity sign in (subscription, browser; also draws AI pictures)");
+        Console.WriteLine("    2  OpenAI       - sign in with ChatGPT (subscription, device code; also draws AI pictures)");
+        Console.WriteLine("    3  OpenAI       - API key (also voice and AI pictures)");
+        Console.WriteLine("    4  Gemini       - API key (also voice)");
+        Console.WriteLine("    5  Anthropic    - API key or token");
         Console.WriteLine("    6  Grok (xAI)   - sign in (subscription, device code)");
         Console.WriteLine("    7  Grok (xAI)   - API key");
-        Console.WriteLine("    8  DeepSeek / Mistral / Groq / OpenRouter / other OpenAI-compatible - API key");
+        Console.WriteLine("    8  Alibaba / DeepSeek / Mistral / Groq / OpenRouter / other OpenAI-compatible - API key");
         Console.WriteLine("    9  Ollama       - local, no key");
         Console.WriteLine("    0  quit");
         var choice = (await AskAsync("  Choice: ", ct) ?? "").Trim();
@@ -235,11 +327,11 @@ public sealed class ConsoleHost
         {
             switch (choice)
             {
-                case "1": await LoginAsync("openai", null, ct); return true;
-                case "2": await KeyAsync("openai", null, null, ct); return true;
-                case "3": await LoginAsync("anthropic", null, ct); return true;
-                case "4": await LoginAsync("antigravity", null, ct); return true;
-                case "5": await KeyAsync("gemini", null, null, ct); return true;
+                case "1": await LoginAsync("antigravity", null, ct); return true;
+                case "2": await LoginAsync("openai", null, ct); return true;
+                case "3": await KeyAsync("openai", null, null, ct); return true;
+                case "4": await KeyAsync("gemini", null, null, ct); return true;
+                case "5": await LoginAsync("anthropic", null, ct); return true;
                 case "6": await LoginAsync("grok", null, ct); return true;
                 case "7": await KeyAsync("grok", null, null, ct); return true;
                 case "8": await KeyAsync(null, null, null, ct); return true;
@@ -249,6 +341,20 @@ public sealed class ConsoleHost
         }
         catch (OperationCanceledException) { return false; }
         catch (Exception ex) { Red("  " + ex.Message); return false; }
+    }
+
+    /// <summary>The project and its job runner: started once per folder, the jobs it left resume here.</summary>
+    private void OpenProject()
+    {
+        if (_jobs is not null && string.Equals(_jobs.Project.Root, _workspace, StringComparison.OrdinalIgnoreCase)) return;
+        _jobs?.Dispose();
+        _project = new StudioProject(_workspace);
+        _jobs = new VideoJobs(_project, () => _opts);
+        _jobs.OnEvent += JobEvent;
+        _jobs.OnRenderLog = line => { if (Log.Verbose) Print(ConsoleColor.DarkGray, "  " + line); };
+        _jobs.Start();
+        var open = _jobs.Store.All().Where(j => j.Open).ToList();
+        if (open.Count > 0) Dim($"  [{open.Count} video job(s) of this folder resume: {string.Join(", ", open.Select(j => "#" + j.Id))}]");
     }
 
     private void Build()
@@ -262,9 +368,10 @@ public sealed class ConsoleHost
         }
         foreach (var p in _opts.Profiles) if (p.Layers.Length == 0) p.Layers = ["any"];
         _router = new LlmRouter(_opts, LlmRouter.CallLogger);
+        OpenProject();
 
-        // Per-workspace state: in the project's own .vanity-agent folder when it exists (so it travels with the
-        // project), otherwise under the agent home.
+        // Per-workspace state: in the project's own .vanity-studio folder when it exists (so it travels with the
+        // project), otherwise under the studio home.
         var project = PromptLibrary.HasProjectDir(_workspace) ? PromptLibrary.ProjectDir(_workspace) : AgentConfig.ProjectDir(_workspace);
         _usage  = new UsageTracker(Path.Combine(project, "usage.json"));
         _memory = new JsonFileMemoryStore(Path.Combine(project, "memory.json"));
@@ -276,52 +383,35 @@ public sealed class ConsoleHost
         _persona = _library.Persona(_personaName);
         if (_personaName is not null && _persona is null)
         {
-            Red($"  no persona '{_personaName}' (/personas lists them); running as the default agent");
+            Red($"  no persona '{_personaName}' (/personas lists them); running as the default videographer");
             _personaName = null;
         }
         foreach (var s in _o.Skills) if (_library.Skill(s) is not null) _pinnedSkills.Add(s); else Red($"  no skill '{s}' (/skills lists them)");
-        _tools  = BuildTools(includeAgent: true, _persona);
+        _tools  = BuildTools(_persona);
 
-        var sessionId = Guid.NewGuid().ToString("N");
+        var keep = _loop?.History.ToList();
         var maxTurns = _persona is { MaxTurns: > 0 } ? _persona.MaxTurns : _o.MaxTurns;
-        _loop = new AgentLoop(new LayerClient(this), _tools, "", ConsoleEvents(depth: 0), _usage, maxTurns, "main", sessionId, deferredTools: DeferredByDefault);
+        _loop = new AgentLoop(new LayerClient(this), _tools, "", ConsoleEvents(), _usage, maxTurns, "main", Guid.NewGuid().ToString("N"), keep);
     }
 
-    /// <summary>Tools whose schemas cost thousands of prompt tokens and are rarely needed: listed in one line each and
-    /// loaded on demand with load_tools (see DeferredTools). Everything else is in the schema on every call.</summary>
-    private static readonly string[] DeferredByDefault = ["computer", "page_view", "image_gen"];
-
-    private ToolRegistry BuildTools(bool includeAgent, PersonaDefinition? persona)
+    private ToolRegistry BuildTools(PersonaDefinition? persona)
     {
         var tools = new ToolRegistry();
-        tools.Register(new SkillViewTool(() => _library));
-        tools.Register(new BashTool(_workspace));
+        tools.Register(new MakeVideoTool(_project, _jobs!, () => _opts, () => _request));
+        tools.Register(new EditVideoTool(_project, _jobs!, () => _opts));
+        tools.Register(new FilesTool(_project));
+        tools.Register(new WebTool(_project));
+        tools.Register(new BrandTool(_project));
         tools.Register(new ReadFileTool(_workspace));
-        tools.Register(new WriteFileTool(_workspace));
-        tools.Register(new WriteFilesTool(_workspace));
-        tools.Register(new EditFileTool(_workspace));
-        tools.Register(new GrepTool(_workspace));
-        tools.Register(new GlobTool(_workspace));
-        tools.Register(new WebFetchTool(_workspace));
-        tools.Register(new WebSearchTool());
-        tools.Register(new ImageGenTool(_workspace, () => _opts));
-        if (OperatingSystem.IsWindows())
-        {
-            tools.Register(new PageViewTool(_workspace));   // headless Edge/Chrome screenshots + DOM probes
-            tools.Register(new ComputerTool());             // screen capture and mouse/keyboard control
-        }
-        tools.Register(new DateTimeTool());
-        tools.Register(new TaskScratchpadTool());
+        tools.Register(new SkillViewTool(() => _library));
         if (!_o.NoMemory) tools.Register(new MemoryTool(_memory));
-        if (includeAgent) tools.Register(new AgentTool(RunSubAgentAsync));
-        tools.Register(new ListToolsTool(tools));
 
-        // A persona with a `tools:` list gets exactly those (plus skill_view and list_tools, which are harmless).
+        // A persona with a `tools:` list gets exactly those (plus skill_view, which is harmless).
         if (persona is { Tools.Length: > 0 })
         {
             var allowed = new ToolRegistry();
             foreach (var t in tools.Tools)
-                if (persona.Tools.Contains(t.Definition.Name, StringComparer.OrdinalIgnoreCase) || t.Definition.Name is "skill_view" or "list_tools")
+                if (persona.Tools.Contains(t.Definition.Name, StringComparer.OrdinalIgnoreCase) || t.Definition.Name is "skill_view")
                     allowed.Register(t);
             tools = allowed;
         }
@@ -344,43 +434,48 @@ public sealed class ConsoleHost
         return (active, loadable);
     }
 
-    /// <summary>A sub-agent: a fresh loop, its own shell, every tool but `agent`, optionally a persona.</summary>
-    private async Task<string> RunSubAgentAsync(string task, string? personaName, CancellationToken ct)
+    private AgentEvents ConsoleEvents()
     {
-        var persona = _library.Persona(personaName);
-        if (personaName is not null && persona is null)
-            return $"Error: no persona named '{personaName}'. Defined personas: {string.Join(", ", _library.Personas.Select(p => p.Name))}";
-        var tools = BuildTools(includeAgent: false, persona);
-        var id = "sub-" + Guid.NewGuid().ToString("N")[..6];
-        var maxTurns = persona is { MaxTurns: > 0 } ? persona.MaxTurns : Math.Max(10, _o.MaxTurns / 2);
-        var loop = new AgentLoop(new LayerClient(this), tools, "", ConsoleEvents(depth: 1), _usage, maxTurns, id, deferredTools: DeferredByDefault);
-        var prevDepth = AgentToolContext.Depth;
-        AgentToolContext.Depth = 1;
-        try
-        {
-            var (active, loadable) = SkillsFor(persona, includePinned: false);
-            loop.SystemPrompt = SystemPrompt.Build(_workspace, ActiveModel(), tools.All.Select(t => t.Name), await MemoryBlockAsync(task, ct),
-                subAgent: true, persona: persona, activeSkills: active, loadableSkills: loadable);
-            var result = await loop.SendAsync(task, ct);
-            _autoSave?.Handle(task, result, loop.LastSteps.ToList(), _workspace);
-            return result;
-        }
-        finally { AgentToolContext.Depth = prevDepth; }
-    }
-
-    private AgentEvents ConsoleEvents(int depth)
-    {
-        var pad = new string(' ', 2 + depth * 4);
-        var tag = depth == 0 ? "" : "[sub] ";
+        const string pad = "  ";
         return new AgentEvents
         {
-            OnStep = (iter, max) => { if (depth == 0) { EndStream(); SpinStart(iter == 1 ? "waiting for " + (ActiveModel() ?? "the model") : $"waiting for {ActiveModel()} (step {iter})"); } },
-            OnModel = (_, _) => { if (depth == 0) { SpinStop(); EndStream(); } },
-            OnToolCall = (tool, preview) => { Console.ForegroundColor = ConsoleColor.DarkYellow; Console.WriteLine($"{pad}→ {tag}{tool}{(preview.Length > 0 ? "  " + preview : "")}"); Console.ResetColor(); },
-            OnToolResult = (tool, sec, chars, err) => { Console.ForegroundColor = err ? ConsoleColor.Red : ConsoleColor.DarkGreen; Console.WriteLine($"{pad}{(err ? "✗" : "←")} {tag}{tool}  ({sec.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s · {chars.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} chars)"); Console.ResetColor(); },
+            OnStep = (iter, max) => { EndStream(); SpinStart(iter == 1 ? "waiting for " + (ActiveModel() ?? "the model") : $"waiting for {ActiveModel()} (step {iter})"); },
+            OnModel = (_, _) => { SpinStop(); EndStream(); },
+            OnToolCall = (tool, preview) => Print(ConsoleColor.DarkYellow, $"{pad}→ {tool}{(preview.Length > 0 ? "  " + preview : "")}"),
+            OnToolResult = (tool, sec, chars, err) => Print(err ? ConsoleColor.Red : ConsoleColor.DarkGreen, $"{pad}{(err ? "✗" : "←")} {tool}  ({sec.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s · {chars.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} chars)"),
             // Reasoning that already streamed live is not printed a second time when the call returns.
-            OnThought = text => { if (depth > 0 || _streamedThought > 0) return; Console.ForegroundColor = ConsoleColor.DarkGray; foreach (var line in Wrap(text.Trim(), 110)) Console.WriteLine(pad + line); Console.ResetColor(); },
+            OnThought = text => { if (_streamedThought > 0) return; lock (ConsoleGate) { Console.ForegroundColor = ConsoleColor.DarkGray; foreach (var line in Wrap(text.Trim(), 110)) Console.WriteLine(pad + line); Console.ResetColor(); } },
         };
+    }
+
+    // ── the video jobs' progress, printed as it happens ──────────────────────────────────────────────────────────
+
+    private void JobEvent(VideoJob job, string line)
+    {
+        var final = line.StartsWith("✓") || line.StartsWith("✗");
+        var color = line.StartsWith("✓") ? ConsoleColor.Green : line.StartsWith("✗") ? ConsoleColor.Red : ConsoleColor.Magenta;
+        if (final)
+        {
+            Print(color, "");
+            foreach (var l in line.Split('\n')) Print(color, "  " + l);
+            if (job.Status == VideoJob.Done) Dim($"  /open {job.Id} plays it · /folder {job.Id} shows the files · /edit {job.Id} opens it in the Studio");
+        }
+        else Print(color, $"  [video #{job.Id}] {line}");
+    }
+
+    /// <summary>One line from any thread: the spinner's line is cleared first, and the prompt is written again when the
+    /// operator was at it.</summary>
+    private void Print(ConsoleColor color, string text)
+    {
+        lock (ConsoleGate)
+        {
+            if (!Console.IsOutputRedirected) Console.Write("\r" + new string(' ', Math.Max(0, Math.Min(Console.BufferWidth - 1, 100))) + "\r");
+            if (_streamKind is not null) { Console.WriteLine(); _streamKind = null; }
+            Console.ForegroundColor = color;
+            Console.WriteLine(text);
+            Console.ResetColor();
+            if (_atPrompt) { Console.ForegroundColor = ConsoleColor.Cyan; Console.Write("You: "); Console.ResetColor(); }
+        }
     }
 
     // ── live thoughts: the model's reasoning as it streams (providers that stream it; others show it at the end) ──
@@ -465,6 +560,143 @@ public sealed class ConsoleHost
             => host._router.CallWithLayerAsync(layer, systemPrompt, history, tools, ct);
     }
 
+    // ── direct commands (no chat) ────────────────────────────────────────────────────────────────────────────────
+
+    private async Task<int> BlocksAsync()
+    {
+        var (cat, error) = await MakeVideoTool.CatalogAsync(CancellationToken.None);
+        if (cat is null) { Red("  " + error); return 1; }
+        Console.WriteLine(MakeVideoTool.Describe(cat));
+        return 0;
+    }
+
+    /// <summary>`tool <name> '<json>'`: one tool call without a model, for scripts and checks. A picture the tool
+    /// returns is saved next to the project's state and its path printed.</summary>
+    private async Task<int> RunToolAsync()
+    {
+        OpenProject();
+        _usage = new UsageTracker(Path.Combine(AgentConfig.ProjectDir(_workspace), "usage.json"));
+        _memory = new JsonFileMemoryStore(Path.Combine(PromptLibrary.HasProjectDir(_workspace) ? PromptLibrary.ProjectDir(_workspace) : AgentConfig.ProjectDir(_workspace), "memory.json"));
+        _library = PromptLibrary.Load(_workspace);
+        var tools = BuildTools(null);
+        var name = _o.CommandArgs.ElementAtOrDefault(0) ?? "";
+        var args = _o.CommandArgs.ElementAtOrDefault(1) ?? "{}";
+        if (!tools.TryGet(name, out var tool) || tool is null) { Red($"  no tool '{name}'; the tools are: {string.Join(", ", tools.All.Select(t => t.Name))}"); return 2; }
+        ToolResultRecord r = tool is IVisualTool v ? await v.ExecuteVisualAsync("cli", args) : new ToolResultRecord { Output = await tool.ExecuteAsync(args) };
+        Console.WriteLine(r.Output);
+        foreach (var (img, i) in (r.ImageDataUrls ?? (r.ScreenshotDataUrl is null ? [] : [r.ScreenshotDataUrl])).Select((x, i) => (x, i)))
+        {
+            var comma = img.IndexOf(',');
+            var ext = img.StartsWith("data:image/jpeg") ? ".jpg" : ".png";
+            var file = Path.Combine(AgentConfig.ProjectDir(_workspace), $"tool-image-{i + 1}{ext}");
+            File.WriteAllBytes(file, Convert.FromBase64String(img[(comma + 1)..]));
+            Dim("  picture: " + file);
+        }
+        // a job the tool queued is waited for, as a one-shot request would
+        var open = _jobs!.Store.All().Where(j => j.Open).Select(j => j.Id).ToList();
+        if (open.Count > 0 && !_o.NoWait) await _jobs.WaitIdleAsync(CancellationToken.None);
+        return r.IsError || r.Output.StartsWith("Error") ? 1 : 0;
+    }
+
+    private async Task<int> ApiDocsAsync()
+    {
+        try { Console.WriteLine(await EditVideoTool.DocsAsync(CancellationToken.None)); return 0; }
+        catch (Exception ex) { Red("  " + ex.Message); return 1; }
+    }
+
+    private async Task<int> SiteAsync()
+    {
+        var url = _o.CommandArgs.FirstOrDefault() ?? "";
+        try { Console.WriteLine(await MakeVideoTool.SiteTextAsync(url, _o.Clicks, _o.SiteLoginFlag, (_o.Format ?? "landscape").ToLowerInvariant(), CancellationToken.None)); return 0; }
+        catch (Exception ex) { Red("  " + ex.Message); return 1; }
+    }
+
+    /// <summary>`render file.json`: a make_video script (validated, its voice and AI pictures made) or a Studio doc,
+    /// rendered here and waited for; the files land in videos/ (or --out).</summary>
+    private async Task<int> RenderFileAsync()
+    {
+        var file = Path.GetFullPath(_o.CommandArgs[0]);
+        if (!File.Exists(file)) { Red("  no such file: " + file); return 2; }
+        OpenProject();
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+        var text = await File.ReadAllTextAsync(file);
+        JsonObject? node;
+        try { node = MakeVideoTool.ParseScript(text) as JsonObject; }
+        catch (JsonException ex) { Red("  " + MakeVideoTool.ScriptError(text, ex)); return 2; }
+        if (node is null) { Red("  the file is not one JSON object"); return 2; }
+        List<long> ids;
+        if (node["script"] is not null && node["scenes"] is JsonArray)
+        {
+            var tool = new MakeVideoTool(_project, _jobs!, () => _opts, () => "");
+            var (queued, problem) = await tool.QueueScriptAsync(text, "", cts.Token);
+            if (problem is not null) { Red("  " + problem); return 1; }
+            ids = queued;
+        }
+        else
+        {
+            var title = System.Text.RegularExpressions.Regex.Replace(Path.GetFileName(file), @"(\.vstudio)?\.json$", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            ids = [_jobs!.QueueDoc(file, title)];
+        }
+        Dim($"  queued {string.Join(", ", ids.Select(i => "#" + i))}; rendering (Ctrl+C stops waiting, the job resumes on the next run)");
+        try { await _jobs!.WaitIdleAsync(cts.Token, ids); }
+        catch (OperationCanceledException) { return 130; }
+        var jobs = ids.Select(i => _jobs.Store.Get(i)).Where(j => j is not null).Cast<VideoJob>().ToList();
+        if (_o.Out is { Length: > 0 } outDir)
+        {
+            Directory.CreateDirectory(outDir);
+            foreach (var j in jobs.Where(j => j.OutDir is not null))
+                foreach (var f in Directory.GetFiles(Path.Combine(_workspace, j.OutDir!)))
+                    File.Copy(f, Path.Combine(outDir, Path.GetFileName(f)), true);
+            Dim("  copied to " + Path.GetFullPath(outDir));
+        }
+        return jobs.All(j => j.Status == VideoJob.Done) ? 0 : 1;
+    }
+
+    private async Task<int> DoctorAsync()
+    {
+        int problems = 0;
+        void Okay(string s) => Print(ConsoleColor.Green, "  ✓ " + s);
+        void Bad(string s, string fix) { problems++; Print(ConsoleColor.Red, "  ✗ " + s); Dim("      " + fix); }
+        void Warn(string s, string fix) { Print(ConsoleColor.Yellow, "  ! " + s); Dim("      " + fix); }
+        var exe = StudioOps.FindBrowser();
+        if (exe is null) Bad("no Chrome or Edge", "install Google Chrome (or set the BrowserPath setting: /set BrowserPath <path to chrome>)");
+        else Okay("browser: " + StudioOps.BrowserLabel(exe) + " (" + exe + ")");
+        var (cat, error) = await MakeVideoTool.CatalogAsync(CancellationToken.None);
+        if (cat is null) Bad("Studio: " + error, "check the connection to " + MakeVideoTool.StudioUrl());
+        else Okay($"Studio: {MakeVideoTool.StudioUrl()} · catalog v{cat.Version}, {cat.Blocks.Count} blocks, {cat.Looks.Count} looks, {cat.Music.Count} music beds");
+        if (VideoText.HasFfprobe()) Okay("ffprobe: found (voice lines are measured exactly)");
+        else Warn("ffprobe: not found", "voice lines are measured from their WAV header; install ffmpeg for MP3 voices");
+        _opts = AgentConfig.Load();
+        var chat = _opts.Profiles.FirstOrDefault(Usable);
+        if (chat is null) Bad("no AI profile to write scripts", "vanity-studio --login antigravity (or /login, /key in the chat)");
+        else Okay($"scripts: {chat.Name} ({chat.Provider}/{chat.Models.FirstOrDefault()})");
+        PrintRoles(indent: "  ");
+        Dim("  login browser (tutorial steps behind a login): " + (Directory.Exists(StudioOps.LoginProfile) ? StudioOps.LoginProfile : "not set up (vanity-studio --site-login <url>)"));
+        Dim("  render jobs: " + StudioOps.Root + $" · {StudioOps.MaxParallel} at a time (VANITY_VIDEO_PARALLEL)");
+        return problems == 0 ? 0 : 1;
+    }
+
+    private void PrintRoles(string indent = "  ")
+    {
+        var voice = VoiceMaker.Candidates(_opts);
+        var stills = ImageMaker.Candidates(_opts);
+        var clips = ClipMaker.Candidates(_opts);
+        Console.WriteLine(indent + "voice  (\"voice\": true)      " + (voice.Count > 0 ? string.Join(" → ", voice.Select(v => $"{v.Name} ({v.ProviderId}/{v.Model})")) : "none: /voice <profile> on a Gemini, OpenAI or Alibaba API-key profile"));
+        Console.WriteLine(indent + "stills ({\"make\":\"still\"})   " + (stills.Count > 0 ? string.Join(" → ", stills.Select(p => $"{p.Name} ({p.Provider})")) : "none: an OpenAI profile (key or login), the Antigravity login or an Alibaba key"));
+        Console.WriteLine(indent + "clips  ({\"make\":\"clip\"})    " + (clips.Count > 0 ? string.Join(" → ", clips.Select(c => $"{c.Name} ({c.Model})")) : "none: /key alibaba (DashScope) or DASHSCOPE_API_KEY"));
+    }
+
+    private void SiteLoginWindow(string url, bool wait)
+    {
+        var p = StudioOps.OpenLoginWindow(url);
+        Cyan($"  The login browser is open at {url}.");
+        Dim("  Log in there, then close that window: tutorial steps with login=true use this session (profile: " + StudioOps.LoginProfile + ").");
+        if (!wait) return;
+        try { p.WaitForExit(); } catch { }
+        Dim("  [login window closed]");
+    }
+
     // ── running ──────────────────────────────────────────────────────────────────────────────────────────────────
 
     private async Task<int> OneShotAsync(string prompt)
@@ -474,23 +706,30 @@ public sealed class ConsoleHost
         var reply = await TurnAsync(prompt, cts.Token, printReply: false);
         if (reply is null) return 1;
         Console.WriteLine(reply);
+        var open = _jobs!.Store.All().Where(j => j.Open).Select(j => j.Id).ToList();
+        if (open.Count > 0 && !_o.NoWait)
+        {
+            Dim($"  waiting for {open.Count} video job(s): {string.Join(", ", open.Select(i => "#" + i))} (Ctrl+C stops waiting; the jobs resume on the next run)");
+            try { await _jobs.WaitIdleAsync(cts.Token); } catch (OperationCanceledException) { }
+        }
         await MemoryAutoSave.WhenSavedAsync(_memory, TimeSpan.FromSeconds(60), CancellationToken.None);   // let the analysis land before exit
-        return 0;
+        var done = _jobs.Store.All().Where(j => open.Contains(j.Id)).ToList();
+        return done.Any(j => j.Status == VideoJob.Failed) ? 1 : 0;
     }
 
     private async Task ReplAsync()
     {
         var p = ActiveProfile();
         Console.WriteLine();
-        Cyan("  vanity-agent " + Version + " · " + _workspace);
+        Cyan("  Vanity Studio " + Version + " · " + _workspace);
         Dim($"  profile: {p?.Name} ({p?.Provider}/{ActiveModel()})" + (OAuthTokenRefresher.UsesOAuth(p!) ? " · signed in" + (string.IsNullOrEmpty(p!.OAuthAccountId) ? "" : " as " + p.OAuthAccountId) : " · api key"));
         PrintContextLine();
-        Dim("  /help for commands · Ctrl+C stops the current task · /quit to exit");
+        Dim("  Ask for a video (\"a 20 s reel for my bakery, use the photos on my desktop\") · /help for commands · Ctrl+C stops the current request");
         Console.WriteLine();
 
         Console.CancelKeyPress += (_, e) =>
         {
-            // Ctrl+C during a task stops the task; at the prompt it ends the program.
+            // Ctrl+C during a request stops it; at the prompt it ends the program (open jobs resume next time).
             var cts = _turnCts;
             if (cts is { IsCancellationRequested: false }) { e.Cancel = true; cts.Cancel(); Dim("  [stopping…]"); }
             else { Log.Flush(); }
@@ -498,10 +737,15 @@ public sealed class ConsoleHost
 
         while (true)
         {
-            Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.Write("You: ");
-            Console.ResetColor();
+            lock (ConsoleGate)
+            {
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.Write("You: ");
+                Console.ResetColor();
+                _atPrompt = true;
+            }
             var input = Console.ReadLine();
+            _atPrompt = false;
             if (input is null) break;
             input = input.Trim();
             if (input.Length == 0) continue;
@@ -515,8 +759,10 @@ public sealed class ConsoleHost
             try { await TurnAsync(input, cts.Token, printReply: true); }
             finally { _turnCts = null; }
         }
+        var open = _jobs?.Store.All().Count(j => j.Open) ?? 0;
+        if (open > 0) Dim($"  [{open} video job(s) still open; they resume the next time vanity-studio runs in this folder]");
         await MemoryAutoSave.WhenSavedAsync(_memory, TimeSpan.FromSeconds(20), CancellationToken.None);
-        Log.Info("vanity-agent done");
+        Log.Info("vanity-studio done");
     }
 
     private void PrintContextLine()
@@ -524,12 +770,16 @@ public sealed class ConsoleHost
         var parts = new List<string>();
         var ins = SystemPrompt.ProjectInstructions(_workspace);
         if (ins.Count > 0) parts.Add("instructions: " + string.Join(", ", ins.Select(i => i.File)));
-        if (PromptLibrary.HasProjectDir(_workspace)) parts.Add("project dir: " + PromptLibrary.ProjectFolder + "/");
+        var brand = _project.Brand();
+        if (VideoText.Str(brand["name"]) is { Length: > 0 } bn) parts.Add("brand: " + bn);
         if (_persona is not null) parts.Add("persona: " + _persona.Name);
         var (active, loadable) = SkillsFor(_persona, includePinned: true);
         if (active.Count > 0) parts.Add("skills: " + string.Join(", ", active.Select(s => s.Name)));
         if (loadable.Count > 0) parts.Add($"{loadable.Count} loadable skill(s)");
+        var jobs = _jobs?.Store.All() ?? [];
+        if (jobs.Count > 0) parts.Add($"{jobs.Count} video job(s) (/jobs)");
         if (parts.Count > 0) Dim("  " + string.Join(" · ", parts));
+        if (!PromptLibrary.HasProjectDir(_workspace)) Dim("  /init sets this folder up as a video project (brand, media/, examples)");
     }
 
     private async Task<string?> TurnAsync(string message, CancellationToken ct, bool printReply)
@@ -541,20 +791,27 @@ public sealed class ConsoleHost
             var (active, loadable) = SkillsFor(_persona, includePinned: true);
             _loop.SystemPrompt = SystemPrompt.Build(_workspace, ActiveModel(), _tools.All.Select(t => t.Name), await MemoryBlockAsync(message, ct),
                 persona: _persona, activeSkills: active, loadableSkills: loadable);
+            _request = message;
+            // finished videos the conversation has not heard of yet go in front of the operator's words
+            var notices = _jobs?.TakeNotices() ?? [];
+            var sent = notices.Count == 0 ? message : string.Join("\n\n", notices) + "\n\n[The operator now says:]\n" + message;
             _streamedThought = 0; _streamKind = null;
             LlmCallScope.OnDelta.Value = OnDelta;
             var clock = System.Diagnostics.Stopwatch.StartNew();
-            var reply = await _loop.SendAsync(message, ct);
+            var reply = await _loop.SendAsync(sent, ct);
             clock.Stop();
             EndStream();
             _autoSave?.Handle(message, reply, _loop.LastSteps.ToList(), _workspace);
             if (printReply)
             {
-                Console.WriteLine();
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.Write("Agent: ");
-                Console.ResetColor();
-                Console.WriteLine(reply.Trim());
+                lock (ConsoleGate)
+                {
+                    Console.WriteLine();
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.Write("Vanity: ");
+                    Console.ResetColor();
+                    Console.WriteLine(reply.Trim());
+                }
                 var (pt, ctok, cached) = _loop.LastTokenUsage;
                 Dim($"  [{_loop.LastModel} · {clock.Elapsed.TotalSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s · tokens: {pt:N0} in / {ctok:N0} out / {cached:N0} cached]");
                 Console.WriteLine();
@@ -589,6 +846,24 @@ public sealed class ConsoleHost
             {
                 case "/quit": case "/exit": case "/q": return false;
                 case "/help": case "/?": PrintHelp(); break;
+                // videos
+                case "/jobs": PrintJobs(); break;
+                case "/job": PrintJob(rest.ElementAtOrDefault(0)); break;
+                case "/cancel": CancelJobs(rest.ElementAtOrDefault(0)); break;
+                case "/open": OpenOutput(rest.ElementAtOrDefault(0), folder: false); break;
+                case "/folder": OpenOutput(rest.ElementAtOrDefault(0), folder: true); break;
+                case "/edit": EditInStudio(rest.ElementAtOrDefault(0)); break;
+                case "/blocks": await BlocksAsync(); break;
+                case "/brand": Console.WriteLine(new BrandTool(_project).Read()); Dim("  files: " + _project.BrandJsonPath + " · " + _project.BrandMdPath); break;
+                case "/media": foreach (var m in _project.Media()) Console.WriteLine($"  {m.Rel,-50} {m.Kind,-8} {m.Dims}"); break;
+                case "/roles": PrintRoles(); Dim("  /voice <profile> [model] · /images <profile> · /clips <profile> [model] assign a role; the chat model is /use"); break;
+                case "/voice": SetRole(rest, "voice"); break;
+                case "/images": SetRole(rest, "photo_gen"); break;
+                case "/clips": SetRole(rest, "video_gen"); break;
+                case "/site-login": if (rest.Length == 0) Red("  /site-login <url>"); else SiteLoginWindow(rest[0], wait: false); break;
+                case "/doctor": await DoctorAsync(); break;
+                case "/studio": Console.WriteLine("  " + MakeVideoTool.StudioUrl()); Dim("  VANITY_STUDIO_URL or /set StudioUrl <url> points at another Studio"); break;
+                // models and logins
                 case "/login": await LoginAsync(rest.ElementAtOrDefault(0), rest.ElementAtOrDefault(1), ct); Rebuild(); break;
                 case "/key": await KeyAsync(rest.ElementAtOrDefault(0), rest.ElementAtOrDefault(1), rest.ElementAtOrDefault(2), ct); Rebuild(); break;
                 case "/profiles": case "/profile": PrintProfiles(); break;
@@ -623,32 +898,118 @@ public sealed class ConsoleHost
     private static void PrintHelp()
     {
         Console.WriteLine("""
+              Videos
+              /jobs                              the video jobs of this folder
+              /job <n>                           one job: its status, files and report
+              /cancel <n|all>                    stop a job (or every job still being made)
+              /open <n>                          play a finished video · /folder <n> shows its files
+              /edit <n>                          open a finished video's project in the Studio's editor in your browser
+              /blocks                            the Studio's scene blocks
+              /brand, /media                     the brand of this folder; its pictures and clips
+              /roles                             which profile speaks, draws stills and makes clips
+              /voice <profile> [model]           give a Gemini / OpenAI / Alibaba API-key profile the voice role
+              /images <profile>                  prefer this profile for AI stills
+              /clips <profile> [model]           the Alibaba profile (and Wan model) for AI clips
+              /site-login <url>                  log in to a site once, for tutorial steps behind a login
+              /doctor                            check the browser, the Studio, ffprobe and the profiles
+              /studio                            the Studio's address
+              Models
               /login [openai|grok|antigravity|anthropic] [name]   sign in with a subscription (or paste an Anthropic key/token)
               /key [provider] [key] [model]      add a profile with an API key (interactive when arguments are missing)
-              /profiles                          list the configured profiles; the first usable one answers
-              /use <name>                        make a profile the active one
-              /model <model>                     set the model of the active profile
-              /tune [setting value]              model settings of the active profile: temperature, top_p, max_tokens, thinking on|off,
-                                                 timeout <s>, ctx <tokens>; no arguments shows them. Gemini/Antigravity thinking depth is
-                                                 the model name's suffix (-low, -medium, -high), so /model picks it there
-              /models                            list the models the active profile can use (asked from the provider)
+              /profiles, /use <name>             list the profiles; make one the active one
+              /model <model>, /models            set the model of the active profile; list what it can use
+              /tune [setting value]              temperature, top_p, max_tokens, thinking on|off, timeout <s>, ctx <tokens>
               /remove <name>                     delete a profile (and its stored tokens)
+              /usage                             what is left on each login and what this project spent
+              Session
               /reset                             clear the conversation
-              /usage                             token usage of this process
-              /cwd [dir]                         show or change the working directory
+              /cwd [dir]                         show or change the project folder
               /tools                             list the tools
-              /memory [list|add <text>|delete <n>]   project notes the agent remembers between sessions
-              /init                              create .vanity-agent/ here with instructions.md, example personas and skills
-              /project                           where the project directory and the global personas/skills live
-              /personas, /persona <name|off>     list personas; switch persona (conversation is kept)
-              /skills, /skill <name>             list skills; pin or unpin a skill for this session
-              /sandbox on|off                    confine the file tools to the working directory
-              /verbose on|off                    echo the diagnostic log
-              /config                            where the config and project state live, and the settings stored there
-              /set <name> [value]                store a machine-local setting in config.json (asked hidden when the value is omitted);
-                                                 GoogleClientSecret = the Antigravity client secret Google needs to refresh the login
-              /quit                              exit
+              /memory [list|add <text>|delete <n>]   notes kept between sessions of this folder
+              /init                              set this folder up: .vanity-studio/ (brand, instructions, personas, skills), media/
+              /project                           where the project and the global personas/skills live
+              /personas, /persona <name|off>     list personas; switch persona (the conversation is kept)
+              /skills, /skill <name>             list skills; pin or unpin one for this session
+              /sandbox on|off                    only files inside the project folder may be used
+              /verbose on|off                    echo the diagnostic log (and the renderer's)
+              /config, /set <name> [value]       where config lives; store a machine-local setting (BrowserPath, StudioUrl,
+                                                 VideoParallel, GeminiVoice, OpenAiVoice, QwenVoice, GoogleClientSecret)
+              /quit                              exit (open jobs resume next time)
             """);
+    }
+
+    private VideoJob? JobArg(string? arg)
+    {
+        var all = _jobs!.Store.All();
+        if (string.IsNullOrWhiteSpace(arg) || arg is "latest" or "last") return all.FirstOrDefault();
+        return long.TryParse(arg.TrimStart('#'), out var id) ? _jobs.Store.Get(id) : null;
+    }
+
+    private void PrintJobs()
+    {
+        var jobs = _jobs!.Store.All();
+        if (jobs.Count == 0) { Dim("  (no video jobs in this folder yet)"); return; }
+        foreach (var j in jobs.Take(30))
+            Print(j.Status switch { VideoJob.Done => ConsoleColor.Green, VideoJob.Failed => ConsoleColor.Red, VideoJob.Cancelled => ConsoleColor.DarkGray, _ => ConsoleColor.White },
+                "  " + VideoJobs.Line(j));
+    }
+
+    private void PrintJob(string? arg)
+    {
+        var j = JobArg(arg);
+        if (j is null) { Red("  no such job (/jobs lists them)"); return; }
+        Console.WriteLine("  " + VideoJobs.Line(j));
+        if (j.Finished && j.Status != VideoJob.Cancelled) foreach (var l in _jobs!.BuildReport(j).raw.Split('\n')) Console.WriteLine("  " + l);
+        if (j.OutDir is not null) Dim("  folder: " + Path.Combine(_workspace, j.OutDir));
+    }
+
+    private void CancelJobs(string? arg)
+    {
+        if (arg is "all" or null)
+        {
+            var open = _jobs!.Store.All().Where(j => j.Open).ToList();
+            if (open.Count == 0) { Dim("  nothing is being made"); return; }
+            foreach (var j in open) Console.WriteLine("  " + _jobs.Cancel(j.Id));
+            return;
+        }
+        if (!long.TryParse(arg.TrimStart('#'), out var id)) { Red("  /cancel <n|all>"); return; }
+        Console.WriteLine("  " + _jobs!.Cancel(id));
+    }
+
+    private void OpenOutput(string? arg, bool folder)
+    {
+        var j = JobArg(arg);
+        if (j is null || j.Video is null) { Red("  no finished video" + (arg is null ? "" : " #" + arg) + " (/jobs lists them)"); return; }
+        var target = Path.Combine(_workspace, folder ? j.OutDir! : j.Video);
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(target) { UseShellExecute = true }); Dim("  [opened " + target + "]"); }
+        catch (Exception ex) { Red("  could not open " + target + ": " + ex.Message); }
+    }
+
+    private void EditInStudio(string? arg)
+    {
+        var j = JobArg(arg);
+        if (j?.Project is null) { Red("  no finished video with a project" + (arg is null ? "" : " #" + arg) + " (/jobs lists them)"); return; }
+        var url = ProjectServer.Open(Path.Combine(_workspace, j.Project), TimeSpan.FromMinutes(10));
+        Dim("  [the Studio opens the project in your browser; the file is served from this machine for 10 minutes]");
+        Dim("  if the browser asks to allow access to this computer, allow it; otherwise use Import video project with " + Path.Combine(_workspace, j.Project));
+        Log.Info("edit link " + url);
+    }
+
+    /// <summary>/voice, /images, /clips: gives a profile the role's layer (and, for voice and clips, the model).</summary>
+    private void SetRole(string[] rest, string layer)
+    {
+        var name = rest.ElementAtOrDefault(0);
+        if (string.IsNullOrWhiteSpace(name)) { PrintRoles(); return; }
+        var opts = AgentConfig.Load();
+        var p = opts.Profiles.FirstOrDefault(x => x.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (p is null) { Red($"  no profile '{name}' (/profiles lists them; /key adds one)"); return; }
+        if (!p.Layers.Contains(layer, StringComparer.OrdinalIgnoreCase)) p.Layers = p.Layers.Concat([layer]).ToArray();
+        if (!p.Layers.Contains("any", StringComparer.OrdinalIgnoreCase) && layer != "any") p.Layers = p.Layers.Concat(["any"]).ToArray();
+        if (rest.ElementAtOrDefault(1) is { Length: > 0 } model) p.RoleModels[layer] = model;
+        AgentConfig.Save(opts);
+        _opts = AgentConfig.Load();
+        Rebuild();
+        PrintRoles();
     }
 
     private void Rebuild()
@@ -704,6 +1065,7 @@ public sealed class ConsoleHost
         ("mistral",    "Mistral",                     "mistral-large-latest"),
         ("groq",       "Groq",                        "llama-3.3-70b-versatile"),
         ("openrouter", "OpenRouter",                  "anthropic/claude-sonnet-4.5"),
+        ("alibaba",    "Alibaba DashScope (Qwen; Wan clips, Qwen voice)", "qwen-plus"),
         ("perplexity", "Perplexity",                  "sonar-pro"),
         ("ollama",     "Ollama (local)",              "qwen3:32b"),
         ("custom",     "Custom OpenAI-compatible URL", ""),
@@ -992,17 +1354,17 @@ public sealed class ConsoleHost
             _personaName = p.Name; _persona = p;
         }
         // The tools and the turn cap follow the persona; the conversation itself is kept.
-        _tools = BuildTools(includeAgent: true, _persona);
+        _tools = BuildTools(_persona);
         var keep = _loop.History.ToList();
         var maxTurns = _persona is { MaxTurns: > 0 } ? _persona.MaxTurns : _o.MaxTurns;
-        _loop = new AgentLoop(new LayerClient(this), _tools, "", ConsoleEvents(depth: 0), _usage, maxTurns, "main", Guid.NewGuid().ToString("N"), keep, DeferredByDefault);
-        Dim(_persona is null ? "  [persona off: default agent]" : $"  [persona: {_persona.Name} · tools: {(_persona.Tools.Length > 0 ? string.Join(", ", _persona.Tools) : "all")}]");
+        _loop = new AgentLoop(new LayerClient(this), _tools, "", ConsoleEvents(), _usage, maxTurns, "main", Guid.NewGuid().ToString("N"), keep);
+        Dim(_persona is null ? "  [persona off: the default videographer]" : $"  [persona: {_persona.Name} · tools: {(_persona.Tools.Length > 0 ? string.Join(", ", _persona.Tools) : "all")}]");
     }
 
     private void PrintPersonas()
     {
         _library = PromptLibrary.Load(_workspace);
-        if (_library.Personas.Count == 0) { Dim("  (no personas; /init creates examples in .vanity-agent/personas, or put .md files in " + Path.Combine(AgentConfig.Dir, "personas") + ")"); return; }
+        if (_library.Personas.Count == 0) { Dim("  (no personas; /init creates examples in .vanity-studio/personas, or put .md files in " + Path.Combine(AgentConfig.Dir, "personas") + ")"); return; }
         foreach (var p in _library.Personas)
         {
             var active = _persona is not null && p.Name.Equals(_persona.Name, StringComparison.OrdinalIgnoreCase);
@@ -1017,7 +1379,7 @@ public sealed class ConsoleHost
     private void PrintSkills()
     {
         _library = PromptLibrary.Load(_workspace);
-        if (_library.Skills.Count == 0) { Dim("  (no skills; /init creates examples in .vanity-agent/skills, or put .md files in " + Path.Combine(AgentConfig.Dir, "skills") + ")"); return; }
+        if (_library.Skills.Count == 0) { Dim("  (no skills; /init creates examples in .vanity-studio/skills, or put .md files in " + Path.Combine(AgentConfig.Dir, "skills") + ")"); return; }
         var (active, _) = SkillsFor(_persona, includePinned: true);
         foreach (var s in _library.Skills)
         {
@@ -1045,7 +1407,7 @@ public sealed class ConsoleHost
         try
         {
             if (VanityPathHelper.IsInside(path, _workspace)) return Path.GetRelativePath(_workspace, path).Replace('\\', '/');
-            if (VanityPathHelper.IsInside(path, AgentConfig.Dir)) return "~/.vanity-agent/" + Path.GetRelativePath(AgentConfig.Dir, path).Replace('\\', '/');
+            if (VanityPathHelper.IsInside(path, AgentConfig.Dir)) return "~/.vanity-studio/" + Path.GetRelativePath(AgentConfig.Dir, path).Replace('\\', '/');
         }
         catch { }
         return path;

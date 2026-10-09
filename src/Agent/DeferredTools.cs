@@ -1,7 +1,7 @@
 using System.Text.Json;
-using VanityAgent.Llm;
+using VanityStudio.Llm;
 
-namespace VanityAgent.Agent;
+namespace VanityStudio.Agent;
 
 /// <summary>Tools whose schemas are not sent on every call. The heavy ones (desktop control, page rendering, image
 /// generation) cost thousands of prompt tokens per turn and are rarely needed; they appear in the system prompt as

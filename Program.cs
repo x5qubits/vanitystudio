@@ -1,1 +1,1 @@
-return await VanityAgent.Host.ConsoleHost.RunAsync(args);
+return await VanityStudio.Host.ConsoleHost.RunAsync(args);

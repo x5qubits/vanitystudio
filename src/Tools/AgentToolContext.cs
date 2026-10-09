@@ -1,4 +1,4 @@
-namespace VanityAgent.Tools;
+namespace VanityStudio.Tools;
 
 /// <summary>Ambient context flowing through the async call chain so stateless tool singletons can tell which agent
 /// (the main loop or a sub-agent) is calling them.</summary>

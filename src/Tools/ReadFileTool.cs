@@ -3,11 +3,11 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor;
-using VanityAgent.Llm;
-using VanityAgent.Tools;
-using VanityAgent.Infra;
+using VanityStudio.Llm;
+using VanityStudio.Tools;
+using VanityStudio.Infra;
 
-namespace VanityAgent.Tools;
+namespace VanityStudio.Tools;
 
 /// <summary>Reads file contents with line numbering and range pagination. Renders images and PDFs; parses Jupyter notebooks.</summary>
 public sealed class ReadFileTool : ITool, IVisualTool
@@ -77,7 +77,7 @@ public sealed class ReadFileTool : ITool, IVisualTool
     /// (<see cref="core.Chat.HistoryLifecycleManager.MaxToolOutputChars"/>): past that cap a result is cut head and
     /// tail with the middle removed, which for source text is a silent hole. So the list is budgeted HERE, on line
     /// boundaries, and every entry that was cut short says where to continue.</summary>
-    public const int ListBudgetChars = VanityAgent.Agent.HistoryLifecycleManager.MaxToolOutputChars - 3_000;
+    public const int ListBudgetChars = VanityStudio.Agent.HistoryLifecycleManager.MaxToolOutputChars - 3_000;
 
     /// <summary>Several files or regions in ONE call. Null when the call carries no list.
     /// A tool that takes one file makes every further file a further turn, and each turn re-sends the whole task

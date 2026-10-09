@@ -1,13 +1,27 @@
 {
   "Profiles": [
     {
-      "Name": "anthropic",
-      "Provider": "anthropic",
+      "Name": "antigravity",
+      "Provider": "Antigravity",
       "Enabled": true,
-      "ApiKeys": [ "sk-ant-api03-..." ],
-      "Models": [ "claude-sonnet-5-5", "claude-haiku-4-5-20251001" ],
+      "ApiKeys": [ "oauth" ],
+      "Models": [ "gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.1-pro-high" ],
       "Layers": [ "any" ],
-      "MaxTokens": 16000
+      "OAuthProvider": "antigravity",
+      "OAuthAccessToken": "filled in by --login antigravity",
+      "OAuthRefreshToken": "filled in by --login antigravity",
+      "OAuthExpiresAt": 0,
+      "DisableThinking": true,
+      "JsonMode": true
+    },
+    {
+      "Name": "gemini",
+      "Provider": "gemini",
+      "Enabled": true,
+      "ApiKeys": [ "AIza..." ],
+      "Models": [ "gemini-3.1-pro", "gemini-2.5-flash-preview-tts" ],
+      "Layers": [ "any", "voice" ],
+      "RoleModels": { "voice": "gemini-2.5-flash-preview-tts" }
     },
     {
       "Name": "openai-key",
@@ -15,37 +29,34 @@
       "Enabled": true,
       "ApiKeys": [ "sk-..." ],
       "Models": [ "gpt-5.5" ],
-      "Layers": [ "any" ]
+      "Layers": [ "any", "photo_gen" ],
+      "RoleModels": { "photo_gen": "gpt-image-1" }
     },
     {
-      "Name": "chatgpt",
-      "Provider": "openai",
+      "Name": "alibaba",
+      "Provider": "alibaba",
       "Enabled": true,
-      "ApiKeys": [ "oauth" ],
-      "Models": [ "gpt-5.5" ],
-      "Layers": [ "any" ],
-      "OAuthProvider": "openai",
-      "OAuthAccessToken": "filled in by /login openai",
-      "OAuthRefreshToken": "filled in by /login openai",
-      "OAuthExpiresAt": 0
+      "ApiKeys": [ "sk-..." ],
+      "Models": [ "qwen-plus" ],
+      "Layers": [ "any", "video_gen" ],
+      "RoleModels": { "video_gen": "wan2.2-i2v-flash" }
     },
     {
-      "Name": "gemini",
-      "Provider": "gemini",
-      "Enabled": true,
-      "ApiKeys": [ "AIza..." ],
-      "Models": [ "gemini-3.1-pro" ],
-      "Layers": [ "any" ]
-    },
-    {
-      "Name": "local",
-      "Provider": "ollama",
+      "Name": "anthropic",
+      "Provider": "anthropic",
       "Enabled": false,
-      "BaseUrl": "http://localhost:11434",
-      "ApiKeys": [],
-      "Models": [ "qwen3:32b" ],
+      "ApiKeys": [ "sk-ant-api03-..." ],
+      "Models": [ "claude-sonnet-5-5" ],
       "Layers": [ "any" ],
-      "NumCtx": 32768
+      "MaxTokens": 16000
     }
-  ]
+  ],
+  "Settings": {
+    "StudioUrl": "https://photovideoeditor.com/app/",
+    "VideoParallel": "2",
+    "GeminiVoice": "Kore",
+    "OpenAiVoice": "alloy",
+    "QwenVoice": "Cherry",
+    "BrowserPath": ""
+  }
 }

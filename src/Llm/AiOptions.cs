@@ -1,7 +1,7 @@
 
 using System.Text.Json;
 
-namespace VanityAgent.Llm;
+namespace VanityStudio.Llm;
 
 /// <summary>
 /// LLM provider catalog. Loaded once from appsettings.json (the same "Ai" section
@@ -43,8 +43,8 @@ public sealed class AiOptions
     private static AiOptions LoadFromDisk()
     {
         // The agent's own config.json first; then appsettings.json ("Ai" section) or ai.json next to the exe / in the cwd.
-        if (File.Exists(VanityAgent.Infra.AgentConfig.ConfigFile))
-            return VanityAgent.Infra.AgentConfig.Load();
+        if (File.Exists(VanityStudio.Infra.AgentConfig.ConfigFile))
+            return VanityStudio.Infra.AgentConfig.Load();
         foreach (var searchDir in new[] { AppContext.BaseDirectory, Directory.GetCurrentDirectory() })
         {
             var appsettings = Path.Combine(searchDir, "appsettings.json");
@@ -81,7 +81,7 @@ public sealed class AiOptions
             }
         }
         throw new InvalidOperationException(
-            $"No AI config found. Expected {VanityAgent.Infra.AgentConfig.ConfigFile} (run vanity-agent and sign in, or /key), or appsettings.json / ai.json in {AppContext.BaseDirectory} or {Directory.GetCurrentDirectory()}");
+            $"No AI config found. Expected {VanityStudio.Infra.AgentConfig.ConfigFile} (run vanity-studio and sign in, or /key), or appsettings.json / ai.json in {AppContext.BaseDirectory} or {Directory.GetCurrentDirectory()}");
     }
 
     public static AiProfile ParseProfile(JsonElement p) => new()

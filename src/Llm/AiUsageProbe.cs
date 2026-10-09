@@ -8,7 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 
-namespace VanityAgent.Llm
+namespace VanityStudio.Llm
 {
     /// <summary>
     /// Reads the SUBSCRIPTION usage/limits for an OAuth ("Login via code") AI profile from the provider's own
@@ -319,10 +319,10 @@ namespace VanityAgent.Llm
                     using var r = await http.SendAsync(req, ct).ConfigureAwait(false);
                     var body = await r.Content.ReadAsStringAsync().ConfigureAwait(false);
                     if (r.IsSuccessStatusCode) { raw = body; hostUsed = baseUrl; break; }
-                    VanityAgent.Infra.Log.Warn($"[usage] {baseUrl} retrieveUserQuotaSummary -> HTTP {(int)r.StatusCode}: {Trim(body)[..Math.Min(600, Trim(body).Length)]}");
+                    VanityStudio.Infra.Log.Warn($"[usage] {baseUrl} retrieveUserQuotaSummary -> HTTP {(int)r.StatusCode}: {Trim(body)[..Math.Min(600, Trim(body).Length)]}");
                     if (includeRaw && raw is null) raw = "HTTP " + (int)r.StatusCode + ": " + Trim(body);
                 }
-                catch (Exception ex) { VanityAgent.Infra.Log.Warn("[usage] " + baseUrl + ": " + ex.Message); }
+                catch (Exception ex) { VanityStudio.Infra.Log.Warn("[usage] " + baseUrl + ": " + ex.Message); }
             }
             if (raw is null) return null;
             var usage = ParseAntigravityQuota(raw, includeRaw);

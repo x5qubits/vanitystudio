@@ -1,4 +1,4 @@
-namespace VanityAgent.Infra;
+namespace VanityStudio.Infra;
 
 /// <summary>Path resolution for the file and shell tools. The agent is a general-purpose CLI: by default it may read
 /// and write anywhere the operator can. With <see cref="Sandbox"/> on (the `--sandbox` switch or `/sandbox on`) every

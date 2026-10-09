@@ -1,5 +1,5 @@
 
-namespace VanityAgent.Llm;
+namespace VanityStudio.Llm;
 
 internal static class NetFxLlmPolyfills
 {

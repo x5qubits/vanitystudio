@@ -5,7 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
-namespace VanityAgent.Llm;
+namespace VanityStudio.Llm;
 
 /// <summary>
 /// Stateless single OpenAI-compatible chat completion (one key + model). Used by LlmRouter.

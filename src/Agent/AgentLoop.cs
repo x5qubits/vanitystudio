@@ -1,9 +1,9 @@
 using System.Text.Json;
-using VanityAgent.Infra;
-using VanityAgent.Llm;
-using VanityAgent.Tools;
+using VanityStudio.Infra;
+using VanityStudio.Llm;
+using VanityStudio.Tools;
 
-namespace VanityAgent.Agent;
+namespace VanityStudio.Agent;
 
 /// <summary>What the loop reports as it runs, for the console (or any other host) to render.</summary>
 public sealed class AgentEvents
@@ -16,7 +16,7 @@ public sealed class AgentEvents
 }
 
 /// <summary>Stateful multi-turn conversation with the model: user message in, tool calls executed in parallel and fed
-/// back, until the model answers without calling a tool. Ported from VanityAgent's ChatSession without personas and
+/// back, until the model answers without calling a tool. Ported from VanityStudio's ChatSession without personas and
 /// skills: one agent, one prompt, every registered tool.</summary>
 public sealed class AgentLoop
 {

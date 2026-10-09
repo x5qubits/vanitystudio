@@ -1,5 +1,6 @@
 bin/
 obj/
+out/
 logs/
 *.user
 *.suo
@@ -8,6 +9,8 @@ logs/
 *.swp
 # local config with keys never belongs in the repo
 config.json
-# the agent's own state never lives in the repo
-.vanity-agent/memory.json
-.vanity-agent/usage.json
+# Vanity Studio's own state and a test project's outputs never live in the repo
+.vanity-studio/
+media/
+videos/
+edits/

@@ -1,8 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using VanityAgent.Infra;
+using VanityStudio.Infra;
 
-namespace VanityAgent.Memory;
+namespace VanityStudio.Memory;
 
 // Disk format: [{id, title, content, saved, by}]
 internal sealed class MemoryRecord

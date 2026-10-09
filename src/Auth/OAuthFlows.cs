@@ -2,10 +2,10 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using VanityAgent.Infra;
-using VanityAgent.Llm;
+using VanityStudio.Infra;
+using VanityStudio.Llm;
 
-namespace VanityAgent.Auth;
+namespace VanityStudio.Auth;
 
 /// <summary>Endpoints for the subscription logins. The client ids are the public ones the providers' own CLIs use
 /// (OpenAI Codex CLI, grok-build, Google Antigravity) and live in <see cref="OAuthTokenRefresher"/>, which needs
@@ -326,7 +326,7 @@ public static class OAuthFlows
     }
 
     private static string Page(bool ok, string message) =>
-        $"<!DOCTYPE html><html><head><meta charset='utf-8'><title>vanity-agent</title><style>body{{margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#111;color:#eee;font-family:system-ui,sans-serif;text-align:center}}.card{{background:#1a1a1a;border-radius:12px;padding:40px 32px;max-width:420px}}.s{{font-size:48px;color:{(ok ? "#4ade80" : "#f87171")}}}</style></head><body><div class='card'><div class='s'>{(ok ? "&#10003;" : "&#10007;")}</div><h2>{(ok ? "Connected" : "Login failed")}</h2><p>{message}</p></div></body></html>";
+        $"<!DOCTYPE html><html><head><meta charset='utf-8'><title>vanity-studio</title><style>body{{margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#111;color:#eee;font-family:system-ui,sans-serif;text-align:center}}.card{{background:#1a1a1a;border-radius:12px;padding:40px 32px;max-width:420px}}.s{{font-size:48px;color:{(ok ? "#4ade80" : "#f87171")}}}</style></head><body><div class='card'><div class='s'>{(ok ? "&#10003;" : "&#10007;")}</div><h2>{(ok ? "Connected" : "Login failed")}</h2><p>{message}</p></div></body></html>";
 
     private static async Task<(bool ok, string body)> GoogleExchangeCodeAsync(HttpClient http, string code, string verifier, string redirectUri, string client, CancellationToken ct)
     {

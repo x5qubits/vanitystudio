@@ -2,7 +2,7 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
 
-namespace VanityAgent.Llm;
+namespace VanityStudio.Llm;
 
 /// <summary>One JSON-Lines entry per LLM call to logs/prompts/YYYY-MM-DD.jsonl. Ported verbatim.</summary>
 public sealed class LlmCallLogger

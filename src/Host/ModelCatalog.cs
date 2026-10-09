@@ -1,8 +1,8 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
-using VanityAgent.Llm;
+using VanityStudio.Llm;
 
-namespace VanityAgent.Host;
+namespace VanityStudio.Host;
 
 /// <summary>What models a profile's credentials can actually use, asked from the provider, never guessed.</summary>
 public static class ModelCatalog
@@ -58,7 +58,7 @@ public static class ModelCatalog
             [
                 "gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high", "gemini-3.1-pro-high", "gemini-3.1-pro", "gemini-3-pro", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash",
                 "gemini-2.5-pro", "gemini-2.5-flash", "claude-sonnet-4-6", "claude-opus-4-6", "gpt-oss-120b-medium",
-                "(the catalog call returned nothing; these are the names the Antigravity app offers - see logs/vanity-agent.log)",
+                "(the catalog call returned nothing; these are the names the Antigravity app offers - see logs/vanity-studio.log)",
             ];
         }
         if (provider == "anthropic")

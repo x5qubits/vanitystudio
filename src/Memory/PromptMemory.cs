@@ -1,7 +1,7 @@
 using System.Text;
 using System.Text.RegularExpressions;
 
-namespace VanityAgent.Memory;
+namespace VanityStudio.Memory;
 
 /// <summary>Project memory in the system prompt. A small store is shown whole; a large one goes through one model
 /// call that keeps only the notes relevant to this request (ordered first by the words they share with it), with the

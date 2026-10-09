@@ -2,7 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
-namespace VanityAgent.Memory;
+namespace VanityStudio.Memory;
 
 /// <summary>One tool call of a turn and the start of its result. <paramref name="Number"/> counts from 1 in call order.</summary>
 public sealed record RunStep(int Number, string Tool, string ArgsJson, string Result, bool IsError);

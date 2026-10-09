@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace VanityAgent.Auth;
+namespace VanityStudio.Auth;
 
 /// <summary>RFC 7636 helpers for the authorization-code flows.</summary>
 public static class Pkce

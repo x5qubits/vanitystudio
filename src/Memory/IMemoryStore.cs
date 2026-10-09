@@ -1,4 +1,4 @@
-namespace VanityAgent.Memory;
+namespace VanityStudio.Memory;
 
 /// <summary>Cold memory store: hybrid semantic (vector) + relational access.
 /// Implementations: <c>InMemoryStore</c> (volatile) and <c>JsonFileMemoryStore</c> (durable, default).</summary>

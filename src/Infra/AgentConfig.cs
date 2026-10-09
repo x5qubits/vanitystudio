@@ -2,12 +2,12 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using VanityAgent.Llm;
+using VanityStudio.Llm;
 
-namespace VanityAgent.Infra;
+namespace VanityStudio.Infra;
 
-/// <summary>Where the agent keeps its own state: <c>%USERPROFILE%\.vanity-agent</c> (or <c>$HOME/.vanity-agent</c>),
-/// overridable with the <c>VANITY_AGENT_HOME</c> environment variable. <c>config.json</c> holds the AI profiles
+/// <summary>Where the agent keeps its own state: <c>%USERPROFILE%\.vanity-studio</c> (or <c>$HOME/.vanity-studio</c>),
+/// overridable with the <c>VANITY_STUDIO_HOME</c> environment variable. <c>config.json</c> holds the AI profiles
 /// (keys, OAuth tokens, models); <c>projects/&lt;slug&gt;</c> holds per-workspace memory and usage; <c>logs</c> the
 /// diagnostics and per-call prompt log; <c>scratch</c> oversized tool outputs.</summary>
 public static class AgentConfig
@@ -16,9 +16,9 @@ public static class AgentConfig
     {
         get
         {
-            var env = Environment.GetEnvironmentVariable("VANITY_AGENT_HOME");
+            var env = Environment.GetEnvironmentVariable("VANITY_STUDIO_HOME");
             if (!string.IsNullOrWhiteSpace(env)) return Path.GetFullPath(env);
-            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".vanity-agent");
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".vanity-studio");
         }
     }
 

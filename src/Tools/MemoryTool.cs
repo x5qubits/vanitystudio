@@ -1,10 +1,10 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using VanityAgent.Infra;
-using VanityAgent.Llm;
-using VanityAgent.Memory;
+using VanityStudio.Infra;
+using VanityStudio.Llm;
+using VanityStudio.Memory;
 
-namespace VanityAgent.Tools;
+namespace VanityStudio.Tools;
 
 /// <summary>Project memory for the agent: facts worth keeping between sessions of one workspace (paths, commands
 /// that work, decisions, how things are wired). Search ranks notes by the words they share with the query and

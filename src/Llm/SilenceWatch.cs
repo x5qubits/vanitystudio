@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 
-namespace VanityAgent.Llm;
+namespace VanityStudio.Llm;
 
 /// <summary>
 /// How long a (login, model) pair may stay silent before a call is given up and the router moves to the next login.
