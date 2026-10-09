@@ -996,7 +996,7 @@ namespace VanityStudio.Video
                 {
                     using (cdp)
                     {
-                        await PreparePageAsync(cdp, phone, cookies, ct).ConfigureAwait(false);
+                        await PreparePageAsync(cdp, phone, cookies, ct, url).ConfigureAwait(false);
                         log($"[studio] site {url}" + (clicks.Count > 0 ? ", then " + string.Join(" > ", clicks) : ""));
                         await cdp.SendAsync("Page.navigate", new { url }, ct).ConfigureAwait(false);
                         await SettleAsync(cdp, ct).ConfigureAwait(false);
@@ -1083,6 +1083,98 @@ namespace VanityStudio.Video
         // a reel or portrait video shows the phone site, 412x915 CSS px at a phone's 2.625 pixel ratio (about 1081 px wide)
         private const int DeskW = 1920, DeskH = 1080, PhoneW = 412, PhoneH = 915;
         private const double PhoneDpr = 2.625;
+        // ── a script's screen steps, tried on the live pages before the job is queued ──────────────────────────────
+        // A step named a button the page does not have ("Vezi Pachetele" on websisco.ro, 2026-10-10): the job spoke its
+        // lines and drew its pictures, then failed at the capture, and a remix had to be asked for. Every step is opened
+        // now, its clicks made and its target looked for with the capture's own rule, so the model fixes its script
+        // before anything is made. A step that was there is not opened again in this run.
+        private static readonly ConcurrentDictionary<string, bool> _stepsThere = new(StringComparer.Ordinal);
+
+        /// <summary>The screen steps of a script (screen-demo's address, clicks and target; screen-flow's pages) that the
+        /// live pages do not have, each naming its scene and what the page offers instead; empty when every step is there
+        /// or the steps cannot be checked (no browser, a page too slow: the render judges those).</summary>
+        public static async Task<List<string>> CheckStepsAsync(JsonObject script, Action<string> log, CancellationToken ct)
+        {
+            var problems = new List<string>();
+            if (script["scenes"] is not JsonArray scenes) return problems;
+            var phone = IsPhoneFormat(Text(script["format"]));
+            var steps = new List<(string at, string url, List<string> clicks, string target, bool login)>();
+            for (int i = 0; i < scenes.Count; i++)
+            {
+                if (scenes[i] is not JsonObject sc) continue;
+                var prm = sc["params"] as JsonObject;
+                var login = prm?["login"] is JsonValue lv && lv.TryGetValue<bool>(out var lb) && lb;
+                var block = Text(sc["block"]);
+                if (block == "screen-flow" && prm?["pages"] is JsonArray pages)
+                    for (int k = 0; k < pages.Count && k < 5; k++)
+                    {
+                        var parts = (Text(pages[k]) ?? "").Split('>').Select(x => x.Trim()).Where(x => x.Length > 0).ToList();
+                        if (parts.Count > 1 && IsHttpUrl(parts[0])) steps.Add(($"scenes[{i}] (screen-flow).params.pages[{k}]", parts[0], parts.Skip(1).ToList(), null, login));
+                    }
+                else if (block == "screen-demo" && Text(prm?["url"])?.Trim() is { } url && IsHttpUrl(url)
+                         && string.IsNullOrWhiteSpace(Text((sc["files"] as JsonObject)?["screen"])))
+                {
+                    var clicks = prm?["clicks"] is JsonArray ca ? ca.Select(Text).Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList() : new List<string>();
+                    var target = Text(prm?["target"])?.Trim();
+                    if (clicks.Count > 0 || !string.IsNullOrEmpty(target)) steps.Add(($"scenes[{i}] (screen-demo)", url, clicks, string.IsNullOrEmpty(target) ? null : target, login));
+                }
+            }
+            string Key((string at, string url, List<string> clicks, string target, bool login) s) => string.Join("\u001f", s.url, string.Join(" > ", s.clicks), s.target ?? "", phone, s.login);
+            var todo = steps.Where(s => !_stepsThere.ContainsKey(Key(s))).ToList();
+            var exe = todo.Count == 0 ? null : FindBrowser();
+            if (exe is null) return problems;
+            var id = "steps-" + Guid.NewGuid().ToString("n").Substring(0, 8);
+            _captures[id] = 0;
+            Browser browser = null;
+            var logins = new Dictionary<string, List<Dictionary<string, object>>>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                CloseLeftoverBrowsers(log);
+                browser = await Browser.StartAsync(exe, Path.Combine(Path.GetTempPath(), ProfilePrefix + id), ct).ConfigureAwait(false);
+                foreach (var s in todo)
+                {
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    cts.CancelAfter(TimeSpan.FromSeconds(60 + 20 * s.clicks.Count));
+                    var (cdp, tab) = await browser.OpenPageAsync(cts.Token).ConfigureAwait(false);
+                    try
+                    {
+                        using (cdp)
+                        {
+                            await PreparePageAsync(cdp, phone, s.login ? LoginCookies(s.url, logins, log) : null, cts.Token, s.url).ConfigureAwait(false);
+                            log($"[studio] step check {s.url}" + (s.clicks.Count > 0 ? " > " + string.Join(" > ", s.clicks) : "") + (s.target != null ? $" [{s.target}]" : ""));
+                            await cdp.SendAsync("Page.navigate", new { url = s.url }, cts.Token).ConfigureAwait(false);
+                            await SettleAsync(cdp, cts.Token).ConfigureAwait(false);
+                            foreach (var words in s.clicks) await ClickAsync(cdp, words, cts.Token).ConfigureAwait(false);
+                            var there = s.target == null || await FindAsync(cdp, s.target, cts.Token).ConfigureAwait(false) is not null;
+                            // a target on a rotating slide is on screen only part of the time, and the capture may come at the
+                            // other part ("Vezi Pachetele" on websisco.ro's carousel): it has to be there on a second look too
+                            var stays = !there || s.target == null || await Task.Delay(4000, cts.Token).ContinueWith(_ => true, cts.Token).ConfigureAwait(false)
+                                        && await FindAsync(cdp, s.target, cts.Token).ConfigureAwait(false) is not null;
+                            if (!there || !stays)
+                            {
+                                var at = await cdp.EvalAsync("location.href", cts.Token).ConfigureAwait(false);
+                                var page = at.ValueKind == JsonValueKind.String ? at.GetString() : s.url;
+                                problems.Add($"{s.at}.params.target: \"{s.target}\" " + (there ? $"shows on {page} only part of the time (a rotating slide or a banner that moves): use a button that stays" : $"is not a button or a link on {page}") +
+                                             $"{await HaveAsync(cdp, cts.Token).ConfigureAwait(false)}. Use the words of one of them.");
+                            }
+                            else _stepsThere[Key(s)] = true;
+                        }
+                    }
+                    catch (StepException ex) { problems.Add($"{s.at}: {ex.Message}. Use the words of one of them."); }
+                    // a page too slow or a check that cannot run does not hold the video back: the capture judges it
+                    catch (Exception ex) when (!ct.IsCancellationRequested) { log($"[studio] step check {s.url}: {ex.Message}"); }
+                    finally { try { await browser.ClosePageAsync(tab).ConfigureAwait(false); } catch { } }
+                }
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested) { log("[studio] the steps could not be checked: " + ex.Message); }
+            finally
+            {
+                browser?.Dispose();
+                _captures.TryRemove(id, out _);
+            }
+            return problems;
+        }
+
         private static bool IsPhoneFormat(string format) => (format ?? "").Trim().ToLowerInvariant() is "reel" or "portrait";
         private static bool IsHttpUrl(string url) => Uri.TryCreate(url, UriKind.Absolute, out var u) && (u.Scheme == "https" || u.Scheme == "http");
 
@@ -1154,7 +1246,7 @@ namespace VanityStudio.Video
             {
                 using (cdp)
                 {
-                    await PreparePageAsync(cdp, phone, cookies, ct).ConfigureAwait(false);
+                    await PreparePageAsync(cdp, phone, cookies, ct, url).ConfigureAwait(false);
                     log($"[studio] capture {url} at {w}x{h}{(phone ? " (phone)" : "")}" + (clicks is { Count: > 0 } ? ", then " + string.Join(" > ", clicks) : ""));
                     await cdp.SendAsync("Page.navigate", new { url }, ct).ConfigureAwait(false);
                     await SettleAsync(cdp, ct).ConfigureAwait(false);
@@ -1246,14 +1338,20 @@ namespace VanityStudio.Video
             finally { await browser.ClosePageAsync(target).ConfigureAwait(false); }
         }
 
-        // the tab as the site should see it: the capture size, a normal browser's agent (a "HeadlessChrome" agent gets
-        // bot walls), on a phone a phone's agent and touch so it serves its real mobile layout; and the operator's login
-        // when the step needs it
-        private static async Task PreparePageAsync(Cdp cdp, bool phone, List<Dictionary<string, object>> cookies, CancellationToken ct)
+        // the tab as the site should see it: a first visit (no cookies, nothing the site stored), the capture size, a normal
+        // browser's agent (a "HeadlessChrome" agent gets bot walls), on a phone a phone's agent and touch so it serves its
+        // real mobile layout; and the operator's login when the step needs it. Every step shares the job's browser: the
+        // cookie banner one step accepted was gone for the next, and its "Accept toate" click failed (2026-10-10).
+        private static async Task PreparePageAsync(Cdp cdp, bool phone, List<Dictionary<string, object>> cookies, CancellationToken ct, string url = null)
         {
             int w = phone ? PhoneW : DeskW, h = phone ? PhoneH : DeskH;
             await cdp.SendAsync("Page.enable", null, ct).ConfigureAwait(false);
             await cdp.SendAsync("Runtime.enable", null, ct).ConfigureAwait(false);
+            await cdp.SendAsync("Network.enable", null, ct).ConfigureAwait(false);
+            await cdp.SendAsync("Network.clearBrowserCookies", null, ct).ConfigureAwait(false);
+            if (Uri.TryCreate(url, UriKind.Absolute, out var site) && (site.Scheme == "https" || site.Scheme == "http"))
+                try { await cdp.SendAsync("Storage.clearDataForOrigin", new { origin = site.GetLeftPart(UriPartial.Authority), storageTypes = "local_storage,session_storage,indexeddb,cache_storage,service_workers" }, ct).ConfigureAwait(false); }
+                catch (Exception) { }   // a browser without the call: the cookies alone are cleared
             await cdp.SendAsync("Emulation.setDeviceMetricsOverride", new { width = w, height = h, deviceScaleFactor = phone ? PhoneDpr : 1, mobile = phone }, ct).ConfigureAwait(false);
             var uaEl = await cdp.EvalAsync("navigator.userAgent", ct).ConfigureAwait(false);
             var ua = uaEl.ValueKind == JsonValueKind.String ? uaEl.GetString() ?? "" : "";
@@ -1262,11 +1360,7 @@ namespace VanityStudio.Video
             else ua = ua.Replace("HeadlessChrome/", "Chrome/");
             if (ua.Length > 0) await cdp.SendAsync("Emulation.setUserAgentOverride", new { userAgent = ua }, ct).ConfigureAwait(false);
             if (phone) await cdp.SendAsync("Emulation.setTouchEmulationEnabled", new { enabled = true, maxTouchPoints = 5 }, ct).ConfigureAwait(false);
-            if (cookies is { Count: > 0 })
-            {
-                await cdp.SendAsync("Network.enable", null, ct).ConfigureAwait(false);
-                await cdp.SendAsync("Network.setCookies", new { cookies }, ct).ConfigureAwait(false);
-            }
+            if (cookies is { Count: > 0 }) await cdp.SendAsync("Network.setCookies", new { cookies }, ct).ConfigureAwait(false);
         }
 
         // the page settles: the document complete, then a moment for fonts, lazy pictures and cookie banners to land;

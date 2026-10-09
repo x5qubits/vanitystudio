@@ -283,6 +283,7 @@ public sealed class MakeVideoTool : IVisualTool
         var errors = Validate(script, cat, _project, _ai());
         if (errors.Count > 0)
             return ([], $"The script was not queued: {errors.Count} problem(s). Fix each one and submit again.\n- " + string.Join("\n- ", errors) + FixesText(fixes), fixes);
+        if (await StepsProblem(script, ct).ConfigureAwait(false) is { } steps) return ([], steps + FixesText(fixes), fixes);
 
         var title = Str(script["title"])!.Trim();
         // takes: several variants of the SAME script with different seeds, numbered titles "(take 1 of 3)"; each comes back
@@ -303,6 +304,16 @@ public sealed class MakeVideoTool : IVisualTool
             ids.Add(_jobs.Queue(scriptN, request ?? ""));
         }
         return (ids, null, fixes);
+    }
+
+    /// <summary>The screen steps the live pages do not have, as a refusal the model fixes before anything is made (the
+    /// buttons and links the page offers instead are listed); null when every step is there.</summary>
+    private static async Task<string?> StepsProblem(JsonObject script, CancellationToken ct)
+    {
+        var problems = await StudioOps.CheckStepsAsync(script, l => Log.Info(l), ct).ConfigureAwait(false);
+        return problems.Count == 0 ? null
+            : $"The script was not queued: {problems.Count} screen step(s) are not on the live page (each was opened in the browser and checked the way the capture checks it). " +
+              "Fix each one with the page's own words and submit again.\n- " + string.Join("\n- ", problems);
     }
 
     // ── remix: patch an existing job's script and queue a new render that REUSES every voice line and AI picture whose
@@ -361,6 +372,7 @@ public sealed class MakeVideoTool : IVisualTool
         var fixes = Repair(script, cat, _ai());
         var errors = Validate(script, cat, _project, _ai());
         if (errors.Count > 0) return Fail(id, $"The remix was not queued: {errors.Count} problem(s) in the patched script.\n- " + string.Join("\n- ", errors) + FixesText(fixes));
+        if (await StepsProblem(script, ct).ConfigureAwait(false) is { } steps) return Fail(id, steps.Replace("The script was not queued", "The remix was not queued") + FixesText(fixes));
         applied.AddRange(fixes.Select(f => "fixed: " + f));
 
         var title = (Str(script["title"]) ?? prev.Title ?? "Video").Trim();
