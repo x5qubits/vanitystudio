@@ -95,11 +95,10 @@ my-shop-videos/
 
 Write what you want the way you would brief a video editor. Some examples:
 
-- `make a facebook ad about https://topdirect.ro/windows-11-pro-retail-licenta-electronica`. It reads the page
-  (`web read`), downloads the product pictures, and builds a 4:5 feed ad from the real name, price and selling
-  points.
-- `make a video on how to order on https://topdirect.ro/`. It walks the shop as a visitor (`make_video site`: home,
-  product, cart, checkout). Each step becomes a real capture with the button tapped and the instruction spoken.
+- `make a facebook ad about https://fiveqb.com`. It reads the page (`web read`), downloads available pictures, and
+  builds a 4:5 feed ad from the site's real text and media.
+- `make a video about https://5qb.ro/`. It opens the site as a visitor (`make_video site`) and turns captured pages
+  into a narrated walkthrough.
 - `a 15 second reel for my bakery, use the photos on my desktop`. It runs `files list folder=desktop`, looks at the
   pictures, and builds a reel from them.
 - `a logo reveal for the YouTube intro, two takes`
@@ -188,19 +187,19 @@ The model writes scripts; you rarely need to. They are plain JSON you can keep, 
 ```json
 {
   "script": 1,
-  "title": "Windows 11 Pro - licență originală",
+  "title": "Five Quantum Bits",
   "format": "portrait",
-  "language": "ro",
+  "language": "en",
   "voice": true,
   "treatment": "bold",
-  "brand": { "name": "topdirect.ro", "url": "topdirect.ro", "logo": "media:logo" },
+  "brand": { "name": "Five Quantum Bits", "url": "fiveqb.com", "logo": "media:logo" },
   "scenes": [
-    { "block": "hook-statement", "line": "Încă rulezi Windows *neactivat*?" },
-    { "block": "picture-hero", "line": "Licență originală Microsoft, livrată pe email în cinci minute.",
-      "params": { "headline": "Livrare în *5 minute*" }, "files": { "picture": "media/web/windows-11-pro.png" } },
-    { "block": "offer-poster", "line": "Licența originală, cu factură fiscală.",
-      "params": { "headline": "Licență *originală*", "figure": "39,99 lei", "button": "Cumpără acum" } },
-    { "block": "cta-close", "line": "Comandă acum pe topdirect.ro", "params": { "button": "topdirect.ro" } }
+    { "block": "hook-statement", "line": "Make your next video by simply describing it." },
+    { "block": "picture-hero", "line": "Turn your ideas, website, and media into polished videos.",
+      "params": { "headline": "Videos made *by asking*" }, "files": { "picture": "media/fiveqb.png" } },
+    { "block": "offer-poster", "line": "Create ads, reels, product demos, and tutorials.",
+      "params": { "headline": "From brief to *video*", "figure": "AI video CLI", "button": "Learn more" } },
+    { "block": "cta-close", "line": "Visit fiveqb.com", "params": { "button": "fiveqb.com" } }
   ]
 }
 ```
@@ -247,9 +246,15 @@ edit_video validate | frame t=4.2 | sheet       look before rendering
 edit_video render name=...                      a job like any other → videos/
 ```
 
-**By hand in the Studio**: `/edit <n>` opens the finished project in the Studio's editor in your browser. The
-project file is served from this machine for ten minutes; allow the browser's prompt to reach this computer if it
-asks. You can also use the Studio's **Import video project** with the `.vstudio.json`.
+**By hand in the Studio**: every finished video ends with an edit link,
+`https://photovideoeditor.com/app/#/video/new?importUrl=...`. Ctrl+click it (or copy it into your browser) and the
+Studio imports the project and opens it in its editor. The link points at a small server on this computer
+(127.0.0.1, port 47812), so it works while Vanity Studio is open:
+
+- `/edit <n>` in the chat opens it for you.
+- For an older video, `vanity-studio edit <n>` serves the link until you press Enter.
+- The first time, Chrome asks whether photovideoeditor.com may reach apps on this device: allow it.
+- Any time, the Studio's home page has **Import project**: choose the `.vstudio.json` from the video's folder.
 
 ## 9. Jobs and what they produce
 

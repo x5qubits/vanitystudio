@@ -4,6 +4,10 @@
 
 It is built for creators and small teams who want to make promotional videos from product pages, websites, and local media without assembling every scene by hand. It is a .NET 8 command-line app and supports multiple AI providers for scripts, voice, images, and clips.
 
+**Every video it makes opens in [Vanity Studio](https://photovideoeditor.com/app/), the free photo & video editor in your browser** (no watermark, no account, your files stay on your device). Click the link it prints and the project is in the editor, ready to change by hand and export.
+
+**[Download for Windows](https://github.com/x5qubits/vanitystudio/releases/latest/download/vanity-studio-win-x64.zip)**: one exe, nothing to install. Other systems: [build from source](#install).
+
 For example, ask it to make:
 
 - "a 20 second Facebook ad for this product page"
@@ -18,20 +22,29 @@ Every video comes back with its contact sheet, a PNG banner of its last frame, a
 Studio's editor in your browser.
 
 ```
-You: make a facebook ad about https://topdirect.ro/windows-11-pro-retail-licenta-electronica
+You: make a facebook ad about https://fiveqb.com
+  · reading https://fiveqb.com
+  · downloading pictures
+  · reading the Studio's scenes
+  · sending the script
 
-  → web  read https://topdirect.ro/windows-11-pro-retail-licenta-electronica
-  → web  download (2 product pictures)
-  → make_video  blocks
-  → make_video  submit
-Vanity: Video job #7 queued: 6 scenes, about 18 s, portrait 4:5 for the Facebook feed.
-  [video #7] voice 6/6 spoken
-  [video #7] render 60%
-  ✓ The video "Windows 11 Pro - licență originală" is ready (job #7).
-  The video: videos/7-windows-11-pro/windows-11-pro.mp4
+Vanity:
+  A 4:5 Facebook-feed ad, about 18 s, made from fiveqb.com's own words and pictures: job #7.
+  It renders in the background.
+
+  #7 rendering…
+
+  ✓ Five Quantum Bits · 18.2 s · portrait · job #7
+    videos\7-five-quantum-bits\                          /open 7 · /folder 7
+    1 hook-statement   …
+    2 picture-hero     …
+    3 offer-poster     …
+    4 cta-close        …
+    Edit in Vanity Studio (Ctrl+click or copy):
+    https://photovideoeditor.com/app/#/video/new?importUrl=http%3A%2F%2F127.0.0.1%3A47812%2Fp%2F7.vstudio.json%3Ft%3D…
 ```
 
-Made by **Five Quantum Bits** ([x5qubits](https://github.com/x5qubits)).
+Made by **Five Quantum Bits** ([fiveqb.com](https://fiveqb.com), [5qb.ro](https://5qb.ro), [GitHub](https://github.com/x5qubits)).
 
 ## What it makes
 
@@ -57,8 +70,12 @@ Made by **Five Quantum Bits** ([x5qubits](https://github.com/x5qubits)).
 
 ## Install
 
-You need Windows, macOS or Linux, the [.NET 8 SDK](https://dotnet.microsoft.com/download), and Google Chrome or
-Microsoft Edge. `ffprobe` (from ffmpeg) is optional: it measures voice lines exactly.
+**Windows:** [download vanity-studio-win-x64.zip](https://github.com/x5qubits/vanitystudio/releases/latest/download/vanity-studio-win-x64.zip),
+unzip it into a folder (or onto your PATH), and run `vanity-studio` in a terminal. It is one self-contained exe; only
+Google Chrome or Microsoft Edge must be installed.
+
+**From source** (Windows, macOS, Linux): you need the [.NET 8 SDK](https://dotnet.microsoft.com/download) and Google
+Chrome or Microsoft Edge. `ffprobe` (from ffmpeg) is optional: it measures voice lines exactly.
 
 ```bash
 git clone https://github.com/x5qubits/vanitystudio.git
@@ -94,7 +111,7 @@ cannot reach the speech and video endpoints.
 cd my-shop-videos
 vanity-studio                                          # the chat
 vanity-studio "a 15 s reel for my bakery, use the photos on my desktop"
-vanity-studio "make a video on how to order on https://topdirect.ro/"
+vanity-studio "make a video about https://fiveqb.com"
 ```
 
 In the chat:
