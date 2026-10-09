@@ -1267,6 +1267,10 @@ public sealed class ConsoleHost
         var otherChats = opts.Profiles.Any(o => !ReferenceEquals(o, p) && Usable(o) && o.Layers.Contains("any", StringComparer.OrdinalIgnoreCase));
         if (otherChats) p.Layers = p.Layers.Where(l => !l.Equals("any", StringComparison.OrdinalIgnoreCase)).ToArray();
         else if (!p.Layers.Contains("any", StringComparer.OrdinalIgnoreCase)) p.Layers = p.Layers.Concat(["any"]).ToArray();
+        // a key kept for the voice lists the provider's voice models, the one it named first: 2.5 flash TTS, then the
+        // others, each with its own free quota per key
+        if (layer == "voice" && otherChats && VoiceMaker.DefaultModels((p.Provider ?? "").ToLowerInvariant()) is { } voices)
+            p.Models = [.. p.Models.Where(m => m.Contains("tts", StringComparison.OrdinalIgnoreCase)).Concat(voices).Distinct(StringComparer.OrdinalIgnoreCase)];
         if (rest.ElementAtOrDefault(1) is { Length: > 0 } model) p.RoleModels[layer] = model;
         AgentConfig.Save(opts);
         _opts = AgentConfig.Load();
