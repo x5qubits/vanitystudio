@@ -166,6 +166,8 @@ public sealed class VideoJobs : IDisposable
     public event Action<VideoJob, string>? OnEvent;
     /// <summary>The renderer's own log lines (browser, capture, render progress).</summary>
     public Action<string>? OnRenderLog;
+    /// <summary>A finished job's edit link (the host's link server), for the report the conversation gets.</summary>
+    public Func<long, string?>? EditLink;
 
     public VideoJobs(StudioProject project, Func<AiOptions> ai)
     {
@@ -945,9 +947,10 @@ public sealed class VideoJobs : IDisposable
         var facts = sb.ToString().TrimEnd();
         // how to change it by hand: the Studio's own editor, from the project file on this computer (the console prints
         // this as the last lines of the report; the conversation gets it here)
+        var link = job.Project is null ? null : EditLink?.Invoke(job.Id);
         var edit = job.Project is null ? "" :
-            $"\nEdit it in Vanity Studio: open {MakeVideoTool.StudioUrl()}#/home, click \"Import video project\" and choose the project file above " +
-            $"(or /edit {job.Id} opens it there in one step). To change it by asking: edit_video open source={job.Id}.";
+            (link is not null ? $"\nEdit it in Vanity Studio: {link} (opens the project in the Studio's editor; works while Vanity Studio is open). Any time: " : "\nEdit it in Vanity Studio: ") +
+            $"open {MakeVideoTool.StudioUrl()}#/home, click \"Import video project\" and choose the project file above. To change it by asking: edit_video open source={job.Id}.";
         return (head + facts + edit, $"✓ The video \"{job.Title}\" is ready (job #{job.Id}).\n" + facts);
     }
 

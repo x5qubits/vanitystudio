@@ -114,6 +114,7 @@ public sealed class ConsoleHost
                 case "doctor": return await host.DoctorAsync();
                 case "jobs": host.OpenProject(); host.PrintJobs(); return 0;
                 case "docs": return await host.ApiDocsAsync();
+                case "edit": host._opts = AgentConfig.Load(); return await host.EditCommandAsync();
                 case "tool": host._opts = AgentConfig.Load(); return await host.RunToolAsync();
             }
             if (o.Command == "render")
@@ -178,7 +179,7 @@ public sealed class ConsoleHost
         catch { }
     }
 
-    private static readonly string[] Commands = ["render", "blocks", "site", "read", "doctor", "jobs", "docs", "tool"];
+    private static readonly string[] Commands = ["render", "blocks", "site", "read", "doctor", "jobs", "docs", "tool", "edit"];
 
     private static Options Parse(string[] args)
     {
@@ -196,6 +197,7 @@ public sealed class ConsoleHost
                     "render" => rest.Count >= 1 && rest[0].EndsWith(".json", StringComparison.OrdinalIgnoreCase),
                     "site" or "read" => rest.Count >= 1 && Uri.TryCreate(rest[0], UriKind.Absolute, out var u) && u.Scheme is "http" or "https",
                     "tool" => rest.Count >= 1 && rest.Count <= 2,
+                    "edit" => rest.Count == 1 && long.TryParse(rest[0].TrimStart('#'), out _),
                     _ => rest.Count == 0,
                 };
                 if (isCommand) { o.Command = a; continue; }
@@ -247,6 +249,7 @@ public sealed class ConsoleHost
               vanity-studio site <url> [--click "A > B"] [--format reel] [--logged-in]
                                                          what a web page shows, as a tutorial step names it
               vanity-studio jobs                         the video jobs of this folder
+              vanity-studio edit <n>                     open finished video n in the Studio's editor (its link is served until Enter)
               vanity-studio docs                         the Studio's video API reference (the project doc format)
               vanity-studio doctor                       check the browser, the Studio, ffprobe and the AI profiles
               vanity-studio tool <name> '<json>'         run one tool without a model (make_video, edit_video, files, brand,
@@ -352,6 +355,7 @@ public sealed class ConsoleHost
         _jobs = new VideoJobs(_project, () => _opts);
         _jobs.OnEvent += JobEvent;
         _jobs.OnRenderLog = line => { if (Log.Verbose) Print(ConsoleColor.DarkGray, "  " + line); };
+        _jobs.EditLink = id => EditServer().EditLink(id);
         _jobs.Start();
         var open = _jobs.Store.All().Where(j => j.Open).ToList();
         if (open.Count > 0) Dim($"  [{open.Count} video job(s) of this folder resume: {string.Join(", ", open.Select(j => "#" + j.Id))}]");
@@ -471,8 +475,9 @@ public sealed class ConsoleHost
                 // the last thing on screen: where to edit it by hand, with the file to import
                 if (job.Project is not null)
                 {
-                    Print(ConsoleColor.Cyan, $"  Edit it in Vanity Studio: {MakeVideoTool.StudioUrl()}#/home  →  Import video project  →");
-                    Print(ConsoleColor.Cyan, $"    {Path.GetFullPath(Path.Combine(_workspace, job.Project))}");
+                    Print(ConsoleColor.Cyan, $"  Edit it in Vanity Studio (Ctrl+click or copy): {EditServer().EditLink(job.Id)}");
+                    Dim($"    the link works while Vanity Studio is open; any time: {MakeVideoTool.StudioUrl()}#/home → Import video project →");
+                    Dim($"    {Path.GetFullPath(Path.Combine(_workspace, job.Project))}");
                 }
                 Dim($"  /open {job.Id} plays it · /folder {job.Id} shows the files · /edit {job.Id} opens it in the Studio in one step");
             }
@@ -1030,10 +1035,29 @@ public sealed class ConsoleHost
     {
         var j = JobArg(arg);
         if (j?.Project is null) { Red("  no finished video with a project" + (arg is null ? "" : " #" + arg) + " (/jobs lists them)"); return; }
-        var url = ProjectServer.Open(Path.Combine(_workspace, j.Project), TimeSpan.FromMinutes(10));
-        Dim("  [the Studio opens the project in your browser; the file is served from this machine for 10 minutes]");
-        Dim("  if the browser asks to allow access to this computer, allow it; otherwise use Import video project with " + Path.Combine(_workspace, j.Project));
-        Log.Info("edit link " + url);
+        var link = EditServer().Open(j.Id);
+        Dim($"  [opening {link} : the Studio loads the project into its editor]");
+        Dim("  if the browser asks to let the Studio reach this computer, allow it; otherwise Import video project with " + Path.Combine(_workspace, j.Project));
+    }
+
+    /// <summary>The session's edit-link server, serving the projects of this folder's finished jobs.</summary>
+    private ProjectServer EditServer() => ProjectServer.For(id =>
+        _jobs?.Store.Get(id) is { Project: { } p } ? Path.GetFullPath(Path.Combine(_workspace, p)) : null);
+
+    /// <summary>`edit <n>`: a finished video's project opened in the Studio's editor, the link served until Enter.</summary>
+    private async Task<int> EditCommandAsync()
+    {
+        OpenProject();
+        var j = JobArg(_o.CommandArgs.FirstOrDefault());
+        if (j?.Project is null) { Red("  no finished video with a project here (vanity-studio jobs lists them)"); return 1; }
+        var server = EditServer();
+        Cyan($"  {server.EditLink(j.Id)}");
+        Dim($"  opening it in your browser: the Studio loads \"{j.Title}\" into its editor (allow it to reach this computer if asked)");
+        server.Open(j.Id);
+        if (Console.IsInputRedirected) { await Task.Delay(TimeSpan.FromMinutes(5)); return 0; }
+        Dim("  press Enter when the Studio shows the project (the link works until then)");
+        await Task.Run(Console.ReadLine);
+        return 0;
     }
 
     /// <summary>/voice, /images, /clips: gives a profile the role's layer (and, for voice and clips, the model).</summary>
