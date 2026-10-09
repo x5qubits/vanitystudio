@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using VanityStudio.Infra;
 using VanityStudio.Llm;
 
@@ -63,7 +65,7 @@ public static class VoiceMaker
         var candidates = Candidates(ai);
         if (candidates.Count == 0)
             throw new InvalidOperationException("No AI profile can speak the lines. Add a Gemini, OpenAI or Alibaba API-key profile and give it the voice role: /voice <profile> (see /roles).");
-        Exception? last = null;
+        var failed = new List<string>();
         foreach (var c in candidates)
         {
             try
@@ -78,9 +80,10 @@ public static class VoiceMaker
                 return new VoiceResult(bytes, mime, c.ProviderId, c.Model, c.Name);
             }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { log?.Invoke($"voice on {c.Name} ({c.ProviderId}) failed: {ex.Message}"); last = ex; }
+            catch (Exception ex) { log?.Invoke($"voice on {c.Name} ({c.ProviderId}) failed: {ex.Message}"); failed.Add(candidates.Count == 1 ? ex.Message : $"{c.Name}: {ex.Message}"); }
         }
-        throw new InvalidOperationException($"All {candidates.Count} voice profile(s) failed. Last error: {last?.Message}", last);
+        // every profile's own reason, not only the last one's
+        throw new InvalidOperationException(string.Join("; ", failed));
     }
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(3) };
@@ -101,9 +104,10 @@ public static class VoiceMaker
                 speechConfig = new { voiceConfig = new { prebuiltVoiceConfig = new { voiceName = VoiceName("gemini", "Kore") } } },
             },
         };
-        Exception? last = null;
+        var walk = new KeyWalk("gemini");
         foreach (var key in keys)
         {
+            if (walk.Resting(key)) continue;
             try
             {
                 using var req = new HttpRequestMessage(HttpMethod.Post,
@@ -111,7 +115,7 @@ public static class VoiceMaker
                 { Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json") };
                 using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
                 var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                if (!resp.IsSuccessStatusCode) throw new InvalidOperationException($"gemini tts {(int)resp.StatusCode}: {Clip(json, 200)}");
+                if (!resp.IsSuccessStatusCode) { walk.Refused(key, (int)resp.StatusCode, json); continue; }
                 using var doc = JsonDocument.Parse(json);
                 var part = doc.RootElement.GetProperty("candidates")[0].GetProperty("content").GetProperty("parts")[0];
                 var inline = part.GetProperty("inlineData");
@@ -123,17 +127,21 @@ public static class VoiceMaker
                 return (WrapPcmAsWav(pcm, rate, 1, 16), "audio/wav");
             }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { last = ex; }
+            catch (Exception ex) { walk.Failed(ex); }
         }
-        throw last ?? new InvalidOperationException("gemini tts: no usable key");
+        throw walk.Error();
     }
 
     /// <summary>Qwen TTS on DashScope (intl first, then the Beijing region): the answer carries a temporary URL of the
     /// finished audio, downloaded before it expires.</summary>
     private static async Task<(byte[] bytes, string mime)> QwenTtsAsync(string model, string text, IReadOnlyList<string> keys, CancellationToken ct)
     {
-        Exception? last = null;
+        var walk = new KeyWalk("qwen");
         foreach (var key in keys)
+        {
+            if (walk.Resting(key)) continue;
+            // a key belongs to one region: it is refused only when every region refused it
+            (int status, string body)? refused = null;
             foreach (var baseUrl in ClipMaker.DashScopeBases)
             {
                 try
@@ -144,7 +152,7 @@ public static class VoiceMaker
                     req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {key}");
                     using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
                     var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                    if (!resp.IsSuccessStatusCode) throw new InvalidOperationException($"qwen tts {(int)resp.StatusCode}: {Clip(json, 200)}");
+                    if (!resp.IsSuccessStatusCode) { refused = ((int)resp.StatusCode, json); continue; }
                     using var doc = JsonDocument.Parse(json);
                     var url = doc.RootElement.GetProperty("output").GetProperty("audio").GetProperty("url").GetString();
                     if (string.IsNullOrWhiteSpace(url)) throw new InvalidOperationException("qwen tts returned no audio url");
@@ -152,9 +160,11 @@ public static class VoiceMaker
                     return (bytes, url.Contains(".mp3", StringComparison.OrdinalIgnoreCase) ? "audio/mpeg" : "audio/wav");
                 }
                 catch (OperationCanceledException) { throw; }
-                catch (Exception ex) { last = ex; }
+                catch (Exception ex) { walk.Failed(ex); }
             }
-        throw last ?? new InvalidOperationException("qwen tts: no usable key");
+            if (refused is { } r) walk.Refused(key, r.status, r.body);
+        }
+        throw walk.Error();
     }
 
     /// <summary>OpenAI speech (audio/speech) as WAV, so its length is read from the header even without ffprobe.</summary>
@@ -162,9 +172,10 @@ public static class VoiceMaker
     {
         var root = string.IsNullOrWhiteSpace(baseUrl) ? "https://api.openai.com/v1" : baseUrl.TrimEnd('/');
         if (!root.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)) root += "/v1";
-        Exception? last = null;
+        var walk = new KeyWalk("openai");
         foreach (var key in keys)
         {
+            if (walk.Resting(key)) continue;
             try
             {
                 var body = new { model, input = text, voice = VoiceName("openai", "alloy"), response_format = "wav" };
@@ -173,14 +184,67 @@ public static class VoiceMaker
                 req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {key}");
                 using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
                 var bytes = await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-                if (!resp.IsSuccessStatusCode) throw new InvalidOperationException($"openai tts {(int)resp.StatusCode}: {Clip(Encoding.UTF8.GetString(bytes), 200)}");
+                if (!resp.IsSuccessStatusCode) { walk.Refused(key, (int)resp.StatusCode, Encoding.UTF8.GetString(bytes)); continue; }
                 return (bytes, "audio/wav");
             }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { last = ex; }
+            catch (Exception ex) { walk.Failed(ex); }
         }
-        throw last ?? new InvalidOperationException("openai tts: no usable key");
+        throw walk.Error();
     }
+
+    // ── keys a provider refused: a blocked or unknown key for good, a used-up quota until it comes back ──────────
+    // Every voice line used to ask every key again, and only the last refusal was told: four keys, three of them out of
+    // quota and one blocked, read as "403 blocked" eight times over (2026-10-09).
+    private static readonly ConcurrentDictionary<string, DateTime> _resting = new(StringComparer.Ordinal);
+
+    /// <summary>One walk over a provider's keys: skips the resting ones, and when none answers says what each did.</summary>
+    private sealed class KeyWalk(string provider)
+    {
+        private readonly List<string> _why = [];
+        private int _skipped;
+
+        public bool Resting(string key)
+        {
+            if (!_resting.TryGetValue(key, out var until) || until <= DateTime.UtcNow) return false;
+            _skipped++;
+            return true;
+        }
+
+        public void Refused(string key, int status, string body)
+        {
+            var (why, rest) = Refusal(status, body);
+            _why.Add(why);
+            if (rest is { } r) _resting[key] = r == TimeSpan.MaxValue ? DateTime.MaxValue : DateTime.UtcNow + r;
+            Log.Warn($"[voice] {provider} key …{(key.Length > 4 ? key[^4..] : "")}: {why}: {Clip(body.Replace('\n', ' '), 160)}");
+        }
+
+        public void Failed(Exception ex) => _why.Add(Clip(ex.Message, 120));
+
+        public Exception Error()
+        {
+            var parts = _why.GroupBy(w => w).Select(g => $"{g.Count()} key{(g.Count() == 1 ? "" : "s")} {g.Key}").ToList();
+            if (_skipped > 0) parts.Add($"{_skipped} key{(_skipped == 1 ? "" : "s")} still resting after an earlier refusal (quota or blocked)");
+            return new InvalidOperationException($"{provider} tts: " + (parts.Count > 0 ? string.Join(", ", parts) : "no usable key"));
+        }
+    }
+
+    /// <summary>Why a key was refused, in words, and how long to leave it alone (null: ask it again next time).</summary>
+    private static (string why, TimeSpan? rest) Refusal(int status, string body) => status switch
+    {
+        429 => ("out of quota (429)", RetryDelay(body) ?? TimeSpan.FromMinutes(15)),
+        401 => ("not accepted (401)", TimeSpan.MaxValue),
+        403 when body.Contains("blocked", StringComparison.OrdinalIgnoreCase) => ("blocked for this API (403)", TimeSpan.MaxValue),
+        403 => ("not allowed (403)", TimeSpan.MaxValue),
+        400 when body.Contains("API_KEY_INVALID") || body.Contains("API key not valid", StringComparison.OrdinalIgnoreCase) => ("not a valid key (400)", TimeSpan.MaxValue),
+        _ => ($"refused (HTTP {status})", null),
+    };
+
+    // Gemini names when to come back: "retryDelay": "37s"
+    private static TimeSpan? RetryDelay(string body) =>
+        Regex.Match(body, @"""retryDelay""\s*:\s*""(\d+(?:\.\d+)?)s""") is { Success: true } m
+            ? TimeSpan.FromSeconds(Math.Max(1, double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)))
+            : null;
 
     /// <summary>Minimal RIFF/WAV header around raw PCM so every downstream tool can read it.</summary>
     private static byte[] WrapPcmAsWav(byte[] pcm, int sampleRate, short channels, short bitsPerSample)

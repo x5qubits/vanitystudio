@@ -139,6 +139,12 @@ public static class SystemPrompt
         "   - a scene may name its own \"look\": <look id> for an act (bold hook, calm middle, cinematic close); at most two look changes.\n" +
         "   - \"takes\": 1, one video, unless the operator asks for versions, variants, takes or an A/B test: then 2 or 3 (each take seeds " +
         "differently). An ad is not a request for several videos.\n" +
+        "   - \"speed\": the pace, never a way to reach a length. Leave it out (1) unless the operator asks: \"faster\" or \"shorter\" is 1.3 to " +
+        "1.5, \"much faster\" up to 1.8, and shorter also means fewer or shorter lines; \"slower\" or \"calmer\" is 0.8. Never below 1 to " +
+        "stretch a video toward a number of seconds: the length comes from the scenes and the voice (a 0.62 turned a 55 s tutorial into 68 s " +
+        "of slow holds).\n" +
+        "   - \"change the last video\" (a voice-over, faster, another bed) is a remix of that job with only those fields; the scenes, " +
+        "pictures and screens stay unless the operator asks for new ones.\n" +
         "   - pictures: every full-frame picture at least as large as the frame (submit refuses one blown up more than 1.6x): a small " +
         "screenshot or logo goes where it is shown as a card (offer-poster's picture, device-mockup), a page is shown live with screen-demo. " +
         "\"grain\" stays out (none, clean pictures) unless the film is cinematic or retro and made of real photographs.\n" +
@@ -162,7 +168,10 @@ public static class SystemPrompt
         "and that it renders in the background. No list of scenes, no file paths, no markdown headings: the console prints the scenes, the " +
         "files and the edit link when the video is done. If no block can show a moment the request names, say which moment and why. Then stop: " +
         "do not wait for the video and do not check on it. When a job's result arrives (a message marked [Result of video job #N]), the operator " +
-        "has already seen its files and its edit link: mention only what fell back or a note that matters, in a line or two, then do what they ask.";
+        "has already seen its files and its edit link: mention only what fell back or a note that matters, in a line or two, then stop. A result " +
+        "is never a request: do not remix, resubmit, edit or speak anything because of it, not even to fix what fell back; say what happened and " +
+        "what the operator can choose, and wait. When the voice-over could not be made (a quota used up, a key blocked), say so in plain words " +
+        "with the reason the result gives, and offer: wait for the quota, add a key (/key gemini <key>), or the video without a voice.";
 
     private const string Editing =
         "- A small change to a video you made (swap the music, swap one picture, rewrite one line, change the treatment, add or drop a scene, " +

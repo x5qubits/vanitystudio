@@ -366,6 +366,10 @@ public sealed class VideoJobs : IDisposable
             : job with { Attempts = attempts, Error = error, NotBefore = DateTime.UtcNow.AddSeconds(15) };
     }
 
+    // a refusal that waiting 15 s does not cure: a quota used up, a key the provider blocks or does not know, no profile
+    private static bool Lasting(string message) =>
+        Regex.IsMatch(message, @"\b(401|403|429)\b|RESOURCE_EXHAUSTED|PERMISSION_DENIED|quota|blocked|No AI profile|no usable key", RegexOptions.IgnoreCase);
+
     private static VideoJob Fail(VideoJob job, string error) => job with
     {
         Status = VideoJob.Failed, Stage = VideoJob.Report, Error = error, FinishedAt = DateTime.UtcNow, NotBefore = null,
@@ -414,7 +418,16 @@ public sealed class VideoJobs : IDisposable
                             Say(job, $"voice {spoken}/{total} spoken ({N(seconds)} s)");
                         }
                         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                        catch (Exception ex) { rec = new JsonObject { ["text"] = line, ["error"] = ErrorText(ex.Message) }; Say(job, $"voice {spoken}/{total} could not be spoken: {ErrorText(ex.Message)}"); }
+                        catch (Exception ex)
+                        {
+                            // A voice-over is all the lines or none: one spoken line and seven silent ones went out as a
+                            // video (2026-10-09). The job stops before the render and says why, so the operator decides:
+                            // wait for the quota, another key, or the video without a voice.
+                            Say(job, $"voice {spoken}/{total} could not be spoken: {ErrorText(ex.Message)}");
+                            if (!Lasting(ex.Message)) throw;   // a passing failure: the job's own retry tries again in 15 s
+                            return Fail(job, "the voice-over could not be made, so the video was not rendered: " + ErrorText(ex.Message) +
+                                             ". Ask again when the quota is back, add a key (/key gemini <key>), or ask for it without a voice.");
+                        }
                     }
                     voice[i.ToString()] = rec;
                     job = Persist(job with { AssetsJson = assets.ToJsonString() });
