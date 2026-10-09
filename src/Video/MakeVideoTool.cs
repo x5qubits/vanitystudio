@@ -266,8 +266,11 @@ public sealed class MakeVideoTool : IVisualTool
 
         var (cat, catError) = await CatalogAsync(ct).ConfigureAwait(false);
         if (cat is null) return ([], catError!, []);
-        // a vertical platform named in the request is a vertical video, whatever shape the script picked
+        // a vertical platform named in the request is a vertical video, whatever shape the script picked; not when the
+        // request names its shape itself: "landscape 16:9 ... reels, posts, logos" listed reels as a feature of the editor
+        // and turned a landscape tutorial into a reel (2026-10-09)
         if (Regex.Match(request ?? "", @"\b(reels?|tik\s?tok|shorts|stories)\b", RegexOptions.IgnoreCase) is { Success: true } asked
+            && !Regex.IsMatch(request ?? "", @"\b(landscape|horizontal|widescreen|square|portrait)\b|\b(16\s*:\s*9|1\s*:\s*1|4\s*:\s*5)\b", RegexOptions.IgnoreCase)
             && Str(script["format"]) is { } shape && shape != "reel" && cat.Formats.Contains("reel"))
             script["format"] = "reel";
         var fixes = Repair(script, cat, _ai());
