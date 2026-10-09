@@ -466,13 +466,40 @@ public sealed class VideoJobs : IDisposable
             picture = (await File.ReadAllBytesAsync(f.Path, ct).ConfigureAwait(false), f.Mime);
         }
         if (kind == "clip" && picture is null) { rec["error"] = "a clip is made from a picture, and none was given"; return rec; }
+        // one AI make at a time in this process: the takes of one ad prepare side by side and asked Google's image model
+        // for their pictures in the same second, and the second request was throttled (429) and its scenes fell back to
+        // text cards (2026-10-09). The same request (kind, prompt, picture, shape) is made once and shared: takes ask
+        // for the same pictures.
+        var key = $"{kind}|{format}|{from}|{prompt}";
+        await _makeGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_made.TryGetValue(key, out var had) && File.Exists(Path.Combine(_project.Root, had)))
+            {
+                rec["path"] = had;
+                Say(job, $"{kind} for scene {scene + 1}: the same one another job made, {had}");
+                return rec;
+            }
+            var made = await MakeNowAsync(job, scene, slot, kind, prompt, picture, format, rec, ct).ConfigureAwait(false);
+            if (Str(made["path"]) is { } p) _made[key] = p;
+            return made;
+        }
+        finally { _makeGate.Release(); }
+    }
+
+    private static readonly SemaphoreSlim _makeGate = new(1, 1);
+    private static readonly ConcurrentDictionary<string, string> _made = new();
+
+    private async Task<JsonObject> MakeNowAsync(VideoJob job, int scene, string slot, string kind, string prompt, (byte[] bytes, string mime)? picture,
+        string format, JsonObject rec, CancellationToken ct)
+    {
         Say(job, $"making a {kind} for scene {scene + 1}: {Short(prompt)}");
         byte[] bytes; string ext;
         try
         {
             if (kind == "clip")
             {
-                bytes = await ClipMaker.RenderAsync(_ai(), picture!.Value, prompt, ct, s => Log.Info($"[video] #{job.Id} clip: {s}")).ConfigureAwait(false);
+                bytes = await Throttled(() => ClipMaker.RenderAsync(_ai(), picture!.Value, prompt, ct, s => Log.Info($"[video] #{job.Id} clip: {s}")), job, ct).ConfigureAwait(false);
                 ext = ".mp4";
             }
             else
@@ -516,7 +543,7 @@ public sealed class VideoJobs : IDisposable
             try
             {
                 drawn++;
-                var bytes = await ImageMaker.DrawAsync(p, ShapeWords(format, again) + " " + prompt + noText, fw, fh, ct, reference).ConfigureAwait(false);
+                var bytes = await Throttled(() => ImageMaker.DrawAsync(p, ShapeWords(format, again) + " " + prompt + noText, fw, fh, ct, reference), job, ct).ConfigureAwait(false);
                 var (w, h) = ImageSize(bytes);
                 var off = w > 0 && h > 0 ? Math.Abs(Math.Log((double)w / h / want)) : 0;
                 if (off > ShapeTolerance) Log.Info($"[video] #{job.Id} still: {p.Name} drew {w}x{h}, not {AspectOf(format)}");
@@ -528,6 +555,26 @@ public sealed class VideoJobs : IDisposable
         }
         if (best is null) throw last ?? new InvalidOperationException("no picture was drawn");
         return CropTo(best.Value.b, want);
+    }
+
+    /// <summary>A provider call that is tried again when the provider is only busy: a 429 / RESOURCE_EXHAUSTED or a 503
+    /// waits the reset the answer names ("reset after 7s"), else 5, 15 then 30 s; three more tries at most. Anything
+    /// else fails at once.</summary>
+    private async Task<T> Throttled<T>(Func<Task<T>> call, VideoJob job, CancellationToken ct)
+    {
+        int[] waits = [5, 15, 30];
+        for (int attempt = 0; ; attempt++)
+        {
+            try { return await call().ConfigureAwait(false); }
+            catch (Exception ex) when (attempt < waits.Length && !ct.IsCancellationRequested
+                && Regex.IsMatch(ex.Message, @"\b(429|503)\b|RESOURCE_EXHAUSTED|UNAVAILABLE|rate.?limit|Throttling", RegexOptions.IgnoreCase))
+            {
+                var named = Regex.Match(ex.Message, @"reset after (\d+(?:\.\d+)?)\s*s", RegexOptions.IgnoreCase);
+                var wait = named.Success ? Math.Min(120, double.Parse(named.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture) + 2) : waits[attempt];
+                Say(job, $"the provider is busy; trying again in {N(wait)} s");
+                await Task.Delay(TimeSpan.FromSeconds(wait), ct).ConfigureAwait(false);
+            }
+        }
     }
 
     // the shape in words, at the start of the prompt; a second try says it more plainly

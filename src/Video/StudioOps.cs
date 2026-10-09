@@ -1423,9 +1423,27 @@ namespace VanityStudio.Video
             if (!IsHttpUrl(url)) throw new ArgumentException("the login page needs an http(s) address");
             var exe = FindBrowser() ?? throw new InvalidOperationException("no Chrome or Edge on this machine");
             Directory.CreateDirectory(LoginProfile);
-            var psi = new ProcessStartInfo(exe) { UseShellExecute = false };
+            var psi = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardError = true, RedirectStandardOutput = true };
             foreach (var a in new[] { "--user-data-dir=" + LoginProfile, "--no-first-run", "--no-default-browser-check", "--new-window", url }) psi.ArgumentList.Add(a);
-            return Process.Start(psi) ?? throw new InvalidOperationException("the browser did not start");
+            var proc = Process.Start(psi) ?? throw new InvalidOperationException("the browser did not start");
+            DrainOutput(proc);
+            return proc;
+        }
+
+        /// <summary>Switches that keep a render browser from starting Chrome's background services (push messaging,
+        /// sync, component updates, default apps): they only fail in a fresh signed-out profile and print errors.</summary>
+        private static readonly string[] QuietArgs =
+        {
+            "--disable-background-networking", "--disable-sync", "--disable-component-update", "--disable-default-apps",
+            "--disable-features=PushMessaging,MediaRouter,OptimizationHints", "--log-level=3",
+        };
+
+        // what the browser writes on its own console goes to the diagnostic log, read as it comes so its pipes never fill
+        private static void DrainOutput(Process proc)
+        {
+            proc.OutputDataReceived += (_, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) Log.Debug("[chrome] " + e.Data); };
+            proc.ErrorDataReceived += (_, e) => { if (!string.IsNullOrWhiteSpace(e.Data)) Log.Debug("[chrome] " + e.Data); };
+            try { proc.BeginOutputReadLine(); proc.BeginErrorReadLine(); } catch { }
         }
 
         /// <summary>The cookies of <paramref name="url"/>'s site in the login profile, as Network.setCookies params, or
@@ -1888,11 +1906,16 @@ try {
                 var psi = new ProcessStartInfo(Exe)
                 {
                     UseShellExecute = false, CreateNoWindow = true,
-                    RedirectStandardError = false, RedirectStandardOutput = false,
+                    // the browser's own chatter ("DevTools listening on ...", push-messaging registration errors of a
+                    // fresh profile) goes to the log, not into the operator's console
+                    RedirectStandardError = true, RedirectStandardOutput = true,
                 };
                 foreach (var a in BrowserArgs(_port, Profile)) psi.ArgumentList.Add(a == "about:blank" ? "--window-size=" + DeskW + "," + DeskH : a);
+                // no background services in a render browser: no push-messaging sign-in, sync or component updates
+                foreach (var a in QuietArgs) psi.ArgumentList.Add(a);
                 psi.ArgumentList.Add("about:blank");
                 _proc = Process.Start(psi) ?? throw new InvalidOperationException("the browser did not start");
+                DrainOutput(_proc);
                 try { OwnProcess?.Invoke(_proc); } catch { }
                 // a cold start on a busy machine (antivirus scanning the fresh profile) can take well over 15 s
                 for (int i = 0; i < 450; i++)
