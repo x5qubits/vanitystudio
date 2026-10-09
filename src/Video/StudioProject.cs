@@ -282,16 +282,22 @@ public static class VideoText
         : b.Length > 11 && b[0] == 0x52 && b[1] == 0x49 && b[8] == 0x57 && b[9] == 0x45 ? "image/webp"
         : "image/png";
 
-    /// <summary>A picture's size in pixels; (0, 0) when it cannot be read (an SVG, a broken file).</summary>
+    /// <summary>A picture's size in pixels, read from its header (nothing is decoded); (0, 0) when it cannot be read
+    /// (an SVG, a broken file).</summary>
     public static (int w, int h) ImageSize(string path)
     {
-        try { var info = SixLabors.ImageSharp.Image.Identify(path); return info is null ? (0, 0) : (info.Width, info.Height); }
+        try { using var codec = SkiaSharp.SKCodec.Create(path); return codec is null ? (0, 0) : (codec.Info.Width, codec.Info.Height); }
         catch { return (0, 0); }
     }
 
     public static (int w, int h) ImageSize(byte[] bytes)
     {
-        try { using var ms = new MemoryStream(bytes); var info = SixLabors.ImageSharp.Image.Identify(ms); return info is null ? (0, 0) : (info.Width, info.Height); }
+        try
+        {
+            using var data = SkiaSharp.SKData.CreateCopy(bytes);
+            using var codec = SkiaSharp.SKCodec.Create(data);
+            return codec is null ? (0, 0) : (codec.Info.Width, codec.Info.Height);
+        }
         catch { return (0, 0); }
     }
 

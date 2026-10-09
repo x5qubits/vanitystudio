@@ -3,8 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Processing;
+using SkiaSharp;
 using VanityStudio.Infra;
 using VanityStudio.Llm;
 using static VanityStudio.Video.VideoText;
@@ -643,19 +642,22 @@ public sealed class VideoJobs : IDisposable
         _ => "A vertical 9:16 photograph, taller than wide, composed for a phone screen.",
     }) + (again ? " The whole picture has exactly this shape, not another one." : "");
 
+    /// <summary>The picture cut to the frame's shape around its centre (PNG); as it is when its shape is already close
+    /// enough, or when it cannot be decoded.</summary>
     internal static byte[] CropTo(byte[] bytes, double want)
     {
         try
         {
-            using var img = Image.Load(bytes);
+            using var img = SKImage.FromEncodedData(bytes);
+            if (img is null) return bytes;
             double have = (double)img.Width / img.Height;
             if (Math.Abs(Math.Log(have / want)) <= ShapeTolerance) return bytes;
             int w = img.Width, h = img.Height;
             if (have > want) w = (int)Math.Round(h * want); else h = (int)Math.Round(w / want);
-            img.Mutate(x => x.Crop(new Rectangle((img.Width - w) / 2, (img.Height - h) / 2, w, h)));
-            using var ms = new MemoryStream();
-            img.SaveAsPng(ms);
-            return ms.ToArray();
+            using var cut = img.Subset(SKRectI.Create((img.Width - w) / 2, (img.Height - h) / 2, w, h));
+            if (cut is null) return bytes;
+            using var data = cut.Encode(SKEncodedImageFormat.Png, 100);
+            return data?.ToArray() ?? bytes;
         }
         catch { return bytes; }
     }

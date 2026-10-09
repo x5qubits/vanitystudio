@@ -18,9 +18,7 @@
   <ItemGroup>
     <!-- PDF text extraction for read_file (pure managed, no native dependency). -->
     <PackageReference Include="PdfPig" Version="0.1.16" />
-    <!-- AI stills: decode, measure, crop to the video's shape. -->
-    <PackageReference Include="SixLabors.ImageSharp" Version="2.1.11" />
-    <!-- make_video look (the picture with its grid) and the stitched website captures, as the Studio's own runner draws them. -->
+    <!-- pictures: make_video look (the grid), the stitched website captures, the size of a picture, AI stills cut to the video's shape. -->
     <PackageReference Include="SkiaSharp" Version="4.152.0" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.152.0" />
   </ItemGroup>
