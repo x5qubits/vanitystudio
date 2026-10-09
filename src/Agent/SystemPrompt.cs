@@ -11,8 +11,11 @@ public static class SystemPrompt
     /// conventional names in the workspace root. Every one that exists is included.</summary>
     public static readonly string[] InstructionFiles = [PromptLibrary.ProjectFolder + "/instructions.md", "AGENTS.md", "VANITY.md", ".vanity-studio.md"];
 
+    /// <param name="media">What this machine can make right now (voice, AI pictures, AI clips), so a script never asks
+    /// for what cannot be made.</param>
     public static string Build(string workspace, string? model, IEnumerable<string> toolNames, string? memoryBlock, bool subAgent = false,
-        PersonaDefinition? persona = null, IReadOnlyList<SkillDefinition>? activeSkills = null, IReadOnlyList<SkillDefinition>? loadableSkills = null)
+        PersonaDefinition? persona = null, IReadOnlyList<SkillDefinition>? activeSkills = null, IReadOnlyList<SkillDefinition>? loadableSkills = null,
+        string? media = null)
     {
         var sb = new StringBuilder();
         if (persona is not null && persona.SystemPrompt.Length > 0)
@@ -40,6 +43,12 @@ public static class SystemPrompt
         sb.AppendLine();
         sb.AppendLine("# Environment");
         sb.AppendLine(EnvInfo(workspace, model));
+        if (!string.IsNullOrWhiteSpace(media))
+        {
+            sb.AppendLine();
+            sb.AppendLine("# What can be made right now (write the script for this; submit refuses the rest)");
+            sb.AppendLine(media.Trim());
+        }
 
         foreach (var (file, text) in ProjectInstructions(workspace))
         {

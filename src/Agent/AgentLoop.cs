@@ -12,6 +12,7 @@ public sealed class AgentEvents
     public Action<string>? OnThought { get; set; }                       // reasoning or interim text the model wrote with its tool calls
     public Action<string, string>? OnToolCall { get; set; }              // tool, argument preview
     public Action<string, double, int, bool>? OnToolResult { get; set; } // tool, seconds, chars, isError
+    public Action<string, string>? OnToolError { get; set; }              // tool, what it said (a refused submit names its problems)
     public Action<string?, string?>? OnModel { get; set; }               // profile, model that answered
 }
 
@@ -212,10 +213,12 @@ public sealed class AgentLoop
             else
             {
                 var output = await tool.ExecuteAsync(tc.ArgsJson, ct).ConfigureAwait(false);
-                record = new ToolResultRecord { ToolCallId = tc.Id, ToolName = tc.Name, Output = output };
+                // a plain tool says it failed in its text
+                record = new ToolResultRecord { ToolCallId = tc.Id, ToolName = tc.Name, Output = output, IsError = output.StartsWith("Error", StringComparison.Ordinal) };
             }
             sw.Stop();
             _events.OnToolResult?.Invoke(tc.Name, sw.Elapsed.TotalSeconds, record.Output.Length, record.IsError);
+            if (record.IsError) _events.OnToolError?.Invoke(tc.Name, record.Output);
             return record;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -224,6 +227,7 @@ public sealed class AgentLoop
             sw.Stop();
             Log.Error($"[{AgentId}] tool:{tc.Name} failed: {ex.Message}");
             _events.OnToolResult?.Invoke(tc.Name, sw.Elapsed.TotalSeconds, ex.Message.Length, true);
+            _events.OnToolError?.Invoke(tc.Name, ex.Message);
             return new ToolResultRecord { ToolCallId = tc.Id, ToolName = tc.Name, Output = $"Tool error: {ex.Message}", IsError = true };
         }
     }

@@ -443,6 +443,14 @@ public sealed class ConsoleHost
             OnModel = (_, _) => { SpinStop(); EndStream(); },
             OnToolCall = (tool, preview) => Print(ConsoleColor.DarkYellow, $"{pad}→ {tool}{(preview.Length > 0 ? "  " + preview : "")}"),
             OnToolResult = (tool, sec, chars, err) => Print(err ? ConsoleColor.Red : ConsoleColor.DarkGreen, $"{pad}{(err ? "✗" : "←")} {tool}  ({sec.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s · {chars.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} chars)"),
+            // why it was refused, so a ✗ is never a mystery (the model reads the whole text and fixes it)
+            OnToolError = (tool, text) =>
+            {
+                var lines = (text ?? "").Replace("\r", "").Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
+                if (lines.Count > 0 && lines[0].StartsWith("Error:", StringComparison.Ordinal)) lines[0] = lines[0][6..].Trim();
+                foreach (var l in lines.Take(6)) Print(ConsoleColor.DarkRed, $"{pad}    {(l.Length > 170 ? l[..167] + "..." : l)}");
+                if (lines.Count > 6) Print(ConsoleColor.DarkRed, $"{pad}    ... ({lines.Count - 6} more line(s))");
+            },
             // Reasoning that already streamed live is not printed a second time when the call returns.
             OnThought = text => { if (_streamedThought > 0) return; lock (ConsoleGate) { Console.ForegroundColor = ConsoleColor.DarkGray; foreach (var line in Wrap(text.Trim(), 110)) Console.WriteLine(pad + line); Console.ResetColor(); } },
         };
@@ -677,6 +685,30 @@ public sealed class ConsoleHost
         return problems == 0 ? 0 : 1;
     }
 
+    /// <summary>What this machine can make right now, for the model: voice, AI pictures, AI clips, each yes or no with
+    /// what to do instead. A script that asked for a voice nobody can speak, or pictures past a used-up quota, was refused
+    /// at submit and cost a round trip (2026-10-09).</summary>
+    private string MediaState()
+    {
+        var voice = VoiceMaker.Candidates(_opts);
+        var stills = ImageMaker.Candidates(_opts);
+        var free = stills.Where(c => !VideoJobs.IsSpent(c.Name, out _)).ToList();
+        var clips = ClipMaker.Candidates(_opts);
+        var sb = new StringBuilder();
+        sb.AppendLine(voice.Count > 0
+            ? $"- voice-over: yes ({string.Join(", ", voice.Select(v => v.Name))})"
+            : "- voice-over: NO. No profile can speak: write \"voice\": false; music and the words on screen carry the video.");
+        if (free.Count > 0) sb.AppendLine($"- AI pictures ({{\"make\": \"still\"}}): yes ({string.Join(", ", free.Select(p => p.Name))})");
+        else if (stills.Count > 0)
+            sb.AppendLine("- AI pictures: NO until " + string.Join(", ", stills.Select(c => { VideoJobs.IsSpent(c.Name, out var u); return $"{u:HH:mm} ({c.Name}'s image quota is used up)"; })) +
+                          ". Use the site's own pictures (web download), its screens (screen-demo), the project's files, or blocks that need no picture.");
+        else sb.AppendLine("- AI pictures: NO image profile. Use the site's own pictures (web download), its screens (screen-demo), the project's files, or blocks that need no picture.");
+        sb.AppendLine(clips.Count > 0
+            ? $"- AI clips ({{\"make\": \"clip\"}}): yes ({string.Join(", ", clips.Select(c => c.Name))})"
+            : "- AI clips: NO (no Alibaba key): use the operator's own clips, or blocks that need none.");
+        return sb.ToString().TrimEnd();
+    }
+
     private void PrintRoles(string indent = "  ")
     {
         var voice = VoiceMaker.Candidates(_opts);
@@ -790,7 +822,7 @@ public sealed class ConsoleHost
             if (_personaName is not null) _persona = _library.Persona(_personaName) ?? _persona;
             var (active, loadable) = SkillsFor(_persona, includePinned: true);
             _loop.SystemPrompt = SystemPrompt.Build(_workspace, ActiveModel(), _tools.All.Select(t => t.Name), await MemoryBlockAsync(message, ct),
-                persona: _persona, activeSkills: active, loadableSkills: loadable);
+                persona: _persona, activeSkills: active, loadableSkills: loadable, media: MediaState());
             _request = message;
             // finished videos the conversation has not heard of yet go in front of the operator's words
             var notices = _jobs?.TakeNotices() ?? [];
