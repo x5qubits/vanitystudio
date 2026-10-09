@@ -537,6 +537,14 @@ public sealed class MakeVideoTool : IVisualTool
                 var good = colors.Select(Str).Where(c => c is not null && Regex.IsMatch(c, "^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")).ToList();
                 if (good.Count != colors.Count) { fixes.Add("brand.colors: only #rrggbb colours are kept"); brand["colors"] = new JsonArray(good.Select(c => (JsonNode?)c).ToArray()); }
                 if (good.Count == 0) brand.Remove("colors");
+                // The Studio dresses the film in the FIRST colour, and only when it has colour (OKLab chroma 0.06 or
+                // more). A site's colours come theme first, and the theme is often the near-grey ground: #0f2540 first
+                // left #3b82f6 unused and the film took its look's red (2026-10-09). The first colourful one leads.
+                else if (Chroma(good[0]!) < AccentChroma && good.FirstOrDefault(c => Chroma(c!) >= AccentChroma) is { } accent)
+                {
+                    brand["colors"] = new JsonArray(good.Where(c => c == accent).Concat(good.Where(c => c != accent)).Select(c => (JsonNode?)c).ToArray());
+                    fixes.Add($"brand.colors: {accent} leads (the Studio takes the first colour as the film's accent; {good[0]} is too grey for one)");
+                }
             }
         }
         if (script["scenes"] is not JsonArray scenes) return fixes;
@@ -594,6 +602,12 @@ public sealed class MakeVideoTool : IVisualTool
                 foreach (var (name, p) in block.Params)
                     if (pz[name] is { } v) Coerce(pz, name, p.Type, fixes, $"{label}.params.{name}", p);
             TidyAddresses(sc, block, fixes, label);
+            // *Emphasis* marks are for a block that draws the line (a param that shows the line, left empty). Anywhere
+            // else the line is only spoken and captioned, and captions print the marks as they are ("*START* CREATING
+            // FREE", 2026-10-09): that line goes to the Studio plain.
+            if (Str(sc["line"]) is { } said && said.Contains('*')
+                && !block.Params.Any(x => x.P.Line && string.IsNullOrWhiteSpace(Str((sc["params"] as JsonObject)?[x.Name]))))
+                sc["line"] = said.Replace("*", "");
             if (sc["files"] is JsonObject files)
                 foreach (var slotName in files.Select(kv => kv.Key).ToList())
                 {
@@ -635,7 +649,23 @@ public sealed class MakeVideoTool : IVisualTool
         if (sc["params"] is not JsonObject ps) return;
         foreach (var (name, p) in block.Params)
         {
-            if (OpensAddress(name)) continue;
+            if (OpensAddress(name))
+            {
+                if (name == "target") continue;
+                if (p.Type == "string" && Str(ps[name]) is { } open && WithScheme(open) is { } full)
+                {
+                    ps[name] = full;
+                    fixes.Add($"{label}.params.{name}: \"{open}\" is opened as \"{full}\"");
+                }
+                else if (p.Type == "list" && ps[name] is JsonArray opens)
+                    for (int k = 0; k < opens.Count; k++)
+                        if (Str(opens[k]) is { } page && WithScheme(page) is { } fullPage)
+                        {
+                            opens[k] = fullPage;
+                            fixes.Add($"{label}.params.{name}[{k}]: \"{page}\" is opened as \"{fullPage}\"");
+                        }
+                continue;
+            }
             if (p.Type == "string" && Str(ps[name]) is { } said && Shown(said) is { } shown)
             {
                 ps[name] = shown;
@@ -652,9 +682,37 @@ public sealed class MakeVideoTool : IVisualTool
     }
 
     // a param the block opens or reads as an address (a screen's url) or finds on the page (its target): kept as written
+    // (screen-flow's pages are addresses it opens: tidied to "github.com/x5qubits/vanitystudio", the render failed, 2026-10-09)
     private static bool OpensAddress(string name) =>
         name is "target" or "links" || name.Contains("url", StringComparison.OrdinalIgnoreCase) || name.Contains("href", StringComparison.OrdinalIgnoreCase)
-        || name.Contains("src", StringComparison.OrdinalIgnoreCase);
+        || name.Contains("src", StringComparison.OrdinalIgnoreCase) || name.Contains("page", StringComparison.OrdinalIgnoreCase);
+
+    // an address the block opens, written without its scheme ("github.com/owner/repo", "shop.ro/cart > Checkout"): https://
+    private static readonly Regex BareAddress = new(@"^(?:www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:[/?#].*)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private static string? WithScheme(string said)
+    {
+        var s = said.Trim();
+        var first = s.Split(" > ")[0].Trim();
+        return first.Contains("://") || !BareAddress.IsMatch(first) ? null : "https://" + s;
+    }
+
+    // the Studio's own test for a colour that can be an accent (brand.js: chromaOf(toOklab(...)) >= 0.06)
+    private const double AccentChroma = 0.06;
+
+    /// <summary>A #rrggbb colour's chroma in OKLab, the way the Studio measures it.</summary>
+    internal static double Chroma(string hex)
+    {
+        static double Lin(int c) { var v = c / 255.0; return v <= 0.04045 ? v / 12.92 : Math.Pow((v + 0.055) / 1.055, 2.4); }
+        var h = hex.TrimStart('#');
+        if (h.Length == 3) h = string.Concat(h.Select(ch => new string(ch, 2)));
+        double r = Lin(Convert.ToInt32(h[..2], 16)), g = Lin(Convert.ToInt32(h[2..4], 16)), b = Lin(Convert.ToInt32(h[4..6], 16));
+        double l = Math.Cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+        double m = Math.Cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+        double s = Math.Cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+        double a = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s, bb = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+        return Math.Sqrt(a * a + bb * bb);
+    }
 
     private static readonly Regex ListWord = new(@"list|feature|bullet|benefit|check|point|highlight|pros", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 

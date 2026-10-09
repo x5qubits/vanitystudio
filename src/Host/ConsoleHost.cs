@@ -16,7 +16,7 @@ namespace VanityStudio.Host;
 /// agent does while it works.</summary>
 public sealed class ConsoleHost
 {
-    private const string Version = "1.0.1";
+    private const string Version = "1.0.2";
 
     private readonly Options _o;
     private string _workspace;
@@ -128,6 +128,10 @@ public sealed class ConsoleHost
             if (o.Usage) { await host.PrintUsageStatsAsync(CancellationToken.None); return 0; }
 
             string? prompt = o.Prompt.Count > 0 ? string.Join(" ", o.Prompt) : null;
+            // a prompt file as the request (vanity-studio C:\...\example_prompt.md): the model reads it with read_file and
+            // makes what it asks for, as it does when the operator types "run example_prompt.md"
+            if (prompt is not null && PromptFile(prompt, host._workspace) is { } file)
+                prompt = $"Run the prompt in the file {file}: read it and make the video it asks for.";
             if (prompt is null && Console.IsInputRedirected)
             {
                 var piped = (await Console.In.ReadToEndAsync()).Trim();
@@ -234,6 +238,20 @@ public sealed class ConsoleHost
         return o;
     }
 
+    /// <summary>The full path of the .md or .txt file a request names when it is nothing but that path (relative to the
+    /// current directory, the project folder, then the program folder where example_prompt.md ships); null for any
+    /// other request.</summary>
+    private static string? PromptFile(string request, string workspace)
+    {
+        var path = request.Trim().Trim('"', '\'');
+        if (!path.EndsWith(".md", StringComparison.OrdinalIgnoreCase) && !path.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)) return null;
+        foreach (var root in new[] { Environment.CurrentDirectory, workspace, AppContext.BaseDirectory })
+        {
+            try { var full = Path.GetFullPath(path, root); if (File.Exists(full)) return full; } catch { }
+        }
+        return null;
+    }
+
     private static void PrintUsage()
     {
         Console.WriteLine("""
@@ -242,6 +260,7 @@ public sealed class ConsoleHost
             usage:
               vanity-studio                              chat: ask for a video, change it, look at it (/help inside)
               vanity-studio "<request>"                  one request, then wait for its videos and exit
+              vanity-studio <prompt.md|prompt.txt>       the request a prompt file holds (example_prompt.md ships next to the program)
               vanity-studio render <script.json|doc.json> [-o dir]
                                                          render a video script or a Studio project without a chat
               vanity-studio blocks                       the Studio's scene blocks (what a script can use)
@@ -552,13 +571,14 @@ public sealed class ConsoleHost
         print(ConsoleColor.Green, $"  ✓ {job.Title} · {secs} s · {format} · job #{job.Id}");
         var folder = job.OutDir is null ? "" : job.OutDir.Replace('/', Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         print(ConsoleColor.Gray, $"    {folder,-52} /open {job.Id} · /folder {job.Id}");
+        // the scenes of the video as rendered (its report), else as written: an overlay (lower-third) rides on the scene
+        // before it, so the two lists differ in length and are not paired by position (the last row came out twice)
         var scenes = (report["scenes"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
-        var written = (script["scenes"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
-        for (int i = 0; i < Math.Max(scenes.Count, written.Count); i++)
+        if (scenes.Count == 0) scenes = (script["scenes"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
+        for (int i = 0; i < scenes.Count; i++)
         {
-            var r = i < scenes.Count ? scenes[i] : null; var w = i < written.Count ? written[i] : null;
-            var block = VideoText.Str(r?["block"]) ?? VideoText.Str(w?["block"]) ?? "";
-            var line = (VideoText.Str(r?["line"]) ?? VideoText.Str(w?["line"]) ?? "").Replace("*", "");
+            var block = VideoText.Str(scenes[i]["block"]) ?? "";
+            var line = (VideoText.Str(scenes[i]["line"]) ?? "").Replace("*", "");
             dim($"    {i + 1} {block,-16} {Clip(line, 90)}");
         }
         // what did not come out as written: a scene that fell back, a picture that could not be made
@@ -580,7 +600,14 @@ public sealed class ConsoleHost
     private static string Calm(string note) =>
         System.Text.RegularExpressions.Regex.Replace(
             System.Text.RegularExpressions.Regex.Replace(note, @"\s*\(""[^""]*""\)", ""),
-            @"could not be made:.*?(?=\s*The scene uses|$)", "could not be made.", System.Text.RegularExpressions.RegexOptions.Singleline);
+            @"could not be made:(?<why>.*?)(?=\s*The scene uses|$)", m => "could not be made" + Why(m.Groups["why"].Value) + ".",
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+
+    // the reason in a few plain words, when it is one the operator can act on
+    private static string Why(string error) =>
+        System.Text.RegularExpressions.Regex.IsMatch(error, @"\b429\b|quota|exhausted|RESOURCE_EXHAUSTED", System.Text.RegularExpressions.RegexOptions.IgnoreCase) ? " (the provider's quota is used up for now)"
+        : System.Text.RegularExpressions.Regex.IsMatch(error, @"\b40[13]\b|blocked|PERMISSION_DENIED|not valid", System.Text.RegularExpressions.RegexOptions.IgnoreCase) ? " (the provider refused the key)"
+        : "";
 
     private bool _exitsAfterRender;
 

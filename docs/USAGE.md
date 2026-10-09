@@ -129,6 +129,20 @@ with "make the music calmer".
 A one-shot request (`vanity-studio "..."`) waits for its videos before it exits. `--no-wait` exits right away, and
 the jobs resume the next time Vanity Studio runs in that folder.
 
+### Prompts in a file
+
+A long request (one scene per moment, the pages to walk, the pictures to use) is easier to keep in a Markdown or text
+file than to retype. Write it in a `.md` or `.txt` file, then either name the file on the command line:
+
+```
+vanity-studio C:\Users\me\Desktop\promo.md
+```
+
+or ask for it in the chat: `run promo.md`, `make the video in brief.txt`. The model reads the file and makes what it
+asks for. A file that explains its prompt keeps the request in a code block, as
+[example_prompt.md](../example_prompt.md) does; that file ships next to the program, so `run example_prompt.md` works
+in any folder.
+
 ## 5. Commands
 
 ### Command line
@@ -137,6 +151,7 @@ the jobs resume the next time Vanity Studio runs in that folder.
 |---|---|
 | `vanity-studio` | the chat in the current folder |
 | `vanity-studio "<request>"` | one request, then wait for its videos (`--no-wait` to skip) |
+| `vanity-studio <prompt.md>` | the request a `.md` or `.txt` file holds, the same way |
 | `vanity-studio render <file.json> [-o dir]` | render a script or a Studio project without a model, and wait |
 | `vanity-studio read <url> [--click "Specs"]` | what a page says: title, prices, product data, text, pictures |
 | `vanity-studio site <url> [--click "A > B"] [--format reel] [--logged-in]` | what a page offers to click, per screen |

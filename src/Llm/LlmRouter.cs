@@ -207,7 +207,7 @@ public sealed class LlmRouter : ILlmClient
             // fails counts as this candidate failing (logged, next candidate tried), exactly like a dead key.
             if (!await OAuthTokenRefresher.EnsureFreshAsync(profile, _userId, ct: ct).ConfigureAwait(false))
             {
-                Console.WriteLine($"[llm] {profile.Name}: OAuth token expired and refresh failed — trying next");
+                Infra.Log.Warn($"[llm] {profile.Name}: OAuth token expired and refresh failed — trying next");
                 lastEx = new InvalidOperationException($"OAuth token expired for profile '{profile.Name}' and refresh failed.");
                 failures++;
                 continue;
@@ -270,9 +270,9 @@ public sealed class LlmRouter : ILlmClient
                         // jailed (rate-limited/cooling). Once a 429'd primary is parked, this flips from "N failed" to
                         // "skipped" - a quick confirmation that the jail is doing its job and not re-hammering the pool.
                         if (failures > 0)
-                            Console.WriteLine($"[llm] layer '{layer}': fell back to profile '{profile.Name}' (model '{model}') after {failures} profile(s) failed");
+                            Infra.Log.Warn($"[llm] layer '{layer}': fell back to profile '{profile.Name}' (model '{model}') after {failures} profile(s) failed");
                         else if (ci > 0)
-                            Console.WriteLine($"[llm] layer '{layer}': using fallback profile '{profile.Name}' (model '{model}') — {ci} profile(s) skipped (rate-limited/cooling)");
+                            Infra.Log.Warn($"[llm] layer '{layer}': using fallback profile '{profile.Name}' (model '{model}') — {ci} profile(s) skipped (rate-limited/cooling)");
                         // Record REAL token usage + cost for the dashboard (best-effort; never breaks the call).
                         bool hadImage = history.Any(h => !string.IsNullOrEmpty(h.ImageDataUrl));
                         AiUsageLog.TryRecord(_userId, layer, profile.Provider, profile.Name, result.ModelName ?? model,
@@ -318,7 +318,7 @@ public sealed class LlmRouter : ILlmClient
                         // the message is not: a pair that fails repeatedly with no success between is not transient.
                         else if (streak >= UnexplainedFailuresBeforeJail)
                             _cooldownUntil[pair] = DateTime.UtcNow + TimeSpan.FromMinutes(30);
-                        Console.WriteLine($"[llm] {profile.Name} key[{keyIdx}] model '{model}' failed ({streak}x): {ex.Message} — trying next");
+                        Infra.Log.Warn($"[llm] {profile.Name} key[{keyIdx}] model '{model}' failed ({streak}x): {ex.Message} — trying next");
                         lastEx = ex;
                         failures++;
                     }

@@ -791,7 +791,9 @@ public sealed class VideoJobs : IDisposable
                         {
                             slots.Remove(slot);
                             var what = Str(make["make"]) == "clip" ? "clip" : "picture";
-                            notes.Add($"{label}: the {what} for {slot} (\"{Short(Str(make["prompt"]) ?? "")}\") could not be made: " +
+                            // "its AI picture", not "the picture for picture" when the slot is named after what fills it
+                            var whose = slot == what || slot == "image" || slot == "video" ? $"its AI {what}" : $"the AI {what} for {slot}";
+                            notes.Add($"{label}: {whose} (\"{Short(Str(make["prompt"]) ?? "")}\") could not be made: " +
                                       $"{Str(rec?["error"]) ?? "it was never made"}. The scene uses its fallback.");
                         }
                     }

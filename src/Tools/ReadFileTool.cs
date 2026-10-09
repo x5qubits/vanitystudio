@@ -12,7 +12,13 @@ namespace VanityStudio.Tools;
 /// <summary>Reads file contents with line numbering and range pagination. Renders images and PDFs; parses Jupyter notebooks.</summary>
 public sealed class ReadFileTool : ITool, IVisualTool
 {
+    /// <summary>A long line is shown whole, in pieces of this many characters (the first under its number, the rest under
+    /// "n+"): cut at 2000, a one-line prompt of 2447 characters lost its last scenes and the model went looking for
+    /// them elsewhere (2026-10-09).</summary>
     public const int MaxLineChars = 2000;
+
+    /// <summary>The most of one line that is shown (a minified file's single line can be megabytes).</summary>
+    public const int MaxLineShown = 40_000;
     private readonly string _baseDir;
 
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -413,9 +419,14 @@ public sealed class ReadFileTool : ITool, IVisualTool
             {
                 int lineNum = startIndex + i + 1;
                 var line    = allLines[startIndex + i];
-                if (line.Length > MaxLineChars) line = line[..MaxLineChars] + $" … [line cut at {MaxLineChars} chars; {line.Length} in the file]";
-                if (shown > 0 && (long)sb.Length + line.Length + 12 > maxChars) break;   // a list entry's share is used up
-                sb.Append(lineNum).Append('\t').AppendLine(line);
+                var whole   = line.Length <= MaxLineShown ? line : line[..MaxLineShown];
+                if (shown > 0 && (long)sb.Length + whole.Length + 12 > maxChars) break;   // a list entry's share is used up
+                for (int at = 0; at == 0 || at < whole.Length; at += MaxLineChars)
+                {
+                    sb.Append(lineNum).Append(at == 0 ? "" : "+").Append('\t').Append(whole.AsSpan(at, Math.Min(MaxLineChars, whole.Length - at)));
+                    if (at + MaxLineChars >= whole.Length && whole.Length < line.Length) sb.Append($" … [line cut at {MaxLineShown} chars; {line.Length} in the file]");
+                    sb.AppendLine();
+                }
                 shown++;
             }
 

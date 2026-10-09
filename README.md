@@ -14,6 +14,10 @@ For example, ask it to make:
 - "a tutorial on how to order on my shop"
 - "a reel from the photos on my desktop"
 
+A full prompt, scene by scene with a voice-over, is in [example_prompt.md](example_prompt.md). It ships next to the
+program: `vanity-studio example_prompt.md`, or `run example_prompt.md` in the chat, makes that video. Your own prompts
+can live in `.md` or `.txt` files the same way.
+
 It reads the site, finds the pictures, writes the video's script, and renders a finished MP4 on your machine with
 [Vanity Studio](https://photovideoeditor.com/app/) (photovideoeditor.com) in a headless browser.
 

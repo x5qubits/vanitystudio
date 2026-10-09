@@ -1722,10 +1722,7 @@ async function renderDoc(api, doc, report, warnings0) {
 }
 
 try {
-  if (job.script && (job.grain == null || job.grain === "film")) {
-    const { runJob } = await import("./js/video/director.js");
-    await runJob(job);
-  } else if (job.script) {
+  if (job.script) {
     const { runJob } = await import("./js/video/director.js");
     const { installVideoApi } = await import("./js/api/videoApi.js");
     // compile and check only: the director leaves the compiled doc and its report (and sets __done, taken back here at
@@ -1734,11 +1731,16 @@ try {
     window.__done = false; window.__result = null;
     if (!pre || !pre.ok || !pre.doc) finish(pre || { ok: false, errors: ["the script did not compile"] });
     else {
-      // the grain the look laid over every picture scene, turned down (subtle) or taken out (none)
-      const k = job.grain === "subtle" ? 0.35 : 0;
-      for (const s of pre.doc.scenes || pre.doc.clips || [])
-        if (Array.isArray(s.effects))
+      // the grain the look laid over every picture scene: kept (film, or the look's own), turned down (subtle) or taken out (none)
+      const k = job.grain === "subtle" ? 0.35 : job.grain === "none" ? 0 : 1;
+      for (const s of pre.doc.scenes || pre.doc.clips || []) {
+        if (k < 1 && Array.isArray(s.effects))
           s.effects = s.effects.map((e) => e && e.type === "noise" ? (k > 0 ? { ...e, amount: +(Number(e.amount || 0) * k).toFixed(4) } : null) : e).filter(Boolean);
+        // a spoken caption off a picture is drawn in the look's ink on its ground: the black outline the captions carry
+        // for a picture swelled dark letters into a smear (2026-10-09). The Studio marks a caption on a picture with its
+        // shadow; one without keeps no outline.
+        for (const ly of s.layers || []) if (ly && ly.kind === "captions" && ly.shadow === false && ly.stroke == null) ly.stroke = false;
+      }
       await renderDoc(installVideoApi(), pre.doc, pre.report, pre.warnings);
     }
   } else {

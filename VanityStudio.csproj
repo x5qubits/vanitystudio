@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <RootNamespace>VanityStudio</RootNamespace>
     <AssemblyName>vanity-studio</AssemblyName>
-    <Version>1.0.1</Version>
+    <Version>1.0.2</Version>
     <LangVersion>latest</LangVersion>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <RollForward>Major</RollForward>
@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <None Include="config.example.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="example_prompt.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -146,7 +146,8 @@ public static class SystemPrompt
         "   - \"change the last video\" (a voice-over, faster, another bed) is a remix of that job with only those fields; the scenes, " +
         "pictures and screens stay unless the operator asks for new ones.\n" +
         "   - pictures: every full-frame picture at least as large as the frame (submit refuses one blown up more than 1.6x): a small " +
-        "screenshot or logo goes where it is shown as a card (offer-poster's picture, device-mockup), a page is shown live with screen-demo. " +
+        "screenshot or logo goes where it is shown as a card (offer-poster's picture, device-mockup), a page is shown live with screen-demo; " +
+        "when submit refuses a picture as too small, move it into such a card and submit again, rather than searching for another picture. " +
         "\"grain\" stays out (none, clean pictures) unless the film is cinematic or retro and made of real photographs.\n" +
         "   - files: the operator's own first (a path in the project, or a full path such as C:/Users/.../Desktop/shop.jpg); for what is " +
         "missing, {\"make\":\"still\",\"prompt\":...} for a picture, {\"make\":\"clip\",\"from\":<picture>,\"prompt\":...} ONLY for body motion. " +
@@ -241,6 +242,7 @@ public static class SystemPrompt
         sb.AppendLine("Studio: " + Video.MakeVideoTool.StudioUrl());
         var desk = Video.FilesTool.KnownFolders();
         sb.AppendLine("Operator's folders: Desktop " + desk["desktop"].Replace('\\', '/') + " · Downloads " + desk["downloads"].Replace('\\', '/') + " · Pictures " + desk["pictures"].Replace('\\', '/') + " · Videos " + desk["videos"].Replace('\\', '/'));
+        sb.AppendLine("Program folder: " + AppContext.BaseDirectory.TrimEnd('\\', '/').Replace('\\', '/') + " (example_prompt.md, a full example prompt, ships here)");
         sb.AppendLine("Platform: " + (OperatingSystem.IsWindows() ? "win32" : OperatingSystem.IsMacOS() ? "darwin" : "linux"));
         sb.AppendLine("Today's date: " + DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
         if (!string.IsNullOrWhiteSpace(model)) sb.AppendLine("Model: " + model);
