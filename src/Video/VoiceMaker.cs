@@ -20,9 +20,12 @@ public sealed record VoiceResult(byte[] Bytes, string Mime, string ProviderId, s
 /// </summary>
 public static class VoiceMaker
 {
-    public sealed record Candidate(string ProviderId, AiProfile Profile, IReadOnlyList<string> Keys, string Model)
+    /// <summary>A profile that can speak, with its voice models in the order they are tried (Google counts the quota per
+    /// model, so a model whose quota is used up hands over to the next).</summary>
+    public sealed record Candidate(string ProviderId, AiProfile Profile, IReadOnlyList<string> Keys, IReadOnlyList<string> Models)
     {
         public string Name => Profile.Name;
+        public string Model => Models[0];
     }
 
     public static Candidate? Resolve(AiProfile p)
@@ -36,17 +39,25 @@ public static class VoiceMaker
         var prov = (p.Provider ?? "").Trim().ToLowerInvariant();
         if (prov is not ("gemini" or "alibaba" or "openai")) return null;
         var pinned = p.RoleModels is { Count: > 0 } && p.RoleModels.TryGetValue("voice", out var pin) && !string.IsNullOrWhiteSpace(pin) ? pin.Trim() : null;
-        var listed = (p.Models ?? []).FirstOrDefault(m => !string.IsNullOrWhiteSpace(m) && m.Contains("tts", StringComparison.OrdinalIgnoreCase));
+        var listed = (p.Models ?? []).Where(m => !string.IsNullOrWhiteSpace(m) && m.Contains("tts", StringComparison.OrdinalIgnoreCase)).Select(m => m.Trim());
         var carries = (p.Layers ?? []).Any(l => string.Equals(l, "voice", StringComparison.OrdinalIgnoreCase));
-        var model = pinned ?? listed ?? (carries ? DefaultModel(prov) : null);
-        return model is null ? null : new Candidate(prov, p, keys, model);
+        var chosen = (pinned is null ? listed : listed.Prepend(pinned)).ToList();
+        if (chosen.Count == 0 && !carries) return null;
+        // the profile's own models first, then the provider's others: the free quota is counted per model and per key,
+        // so when every key is used up on one model the next model still speaks
+        var models = chosen.Concat(DefaultModels(prov)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return new Candidate(prov, p, keys, models);
     }
 
-    public static string DefaultModel(string provider) => provider switch
+    public static string DefaultModel(string provider) => DefaultModels(provider)[0];
+
+    /// <summary>A provider's voice models in the order they are tried. Gemini's (listed live 2026-10-09): 2.5 flash first
+    /// (the operator's choice), then 3.8 flash, 3.1 flash, 3.8 flash lite and 2.5 pro; each has its own quota.</summary>
+    public static string[] DefaultModels(string provider) => provider switch
     {
-        "gemini" => "gemini-2.5-flash-preview-tts",
-        "alibaba" => "qwen3-tts-flash",
-        _ => "gpt-4o-mini-tts",
+        "gemini" => ["gemini-2.5-flash-preview-tts", "gemini-3.8-flash-tts", "gemini-3.1-flash-tts-preview", "gemini-3.8-flash-lite-tts", "gemini-2.5-pro-preview-tts"],
+        "alibaba" => ["qwen3-tts-flash"],
+        _ => ["gpt-4o-mini-tts"],
     };
 
     /// <summary>The profiles that can speak: those carrying the voice layer first, then the others, in config order.</summary>
@@ -70,14 +81,14 @@ public static class VoiceMaker
         {
             try
             {
-                var (bytes, mime) = c.ProviderId switch
+                var (bytes, mime, model) = c.ProviderId switch
                 {
-                    "gemini" => await GeminiTtsAsync(c.Model, text, c.Keys, ct).ConfigureAwait(false),
+                    "gemini" => await GeminiTtsAsync(c.Models, text, c.Keys, ct).ConfigureAwait(false),
                     "alibaba" => await QwenTtsAsync(c.Model, text, c.Keys, ct).ConfigureAwait(false),
                     _ => await OpenAiTtsAsync(c.Model, text, c.Keys, c.Profile.BaseUrl, ct).ConfigureAwait(false),
                 };
                 if (bytes.Length == 0) throw new InvalidOperationException("the provider returned no audio");
-                return new VoiceResult(bytes, mime, c.ProviderId, c.Model, c.Name);
+                return new VoiceResult(bytes, mime, c.ProviderId, model, c.Name);
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { log?.Invoke($"voice on {c.Name} ({c.ProviderId}) failed: {ex.Message}"); failed.Add(candidates.Count == 1 ? ex.Message : $"{c.Name}: {ex.Message}"); }
@@ -91,55 +102,67 @@ public static class VoiceMaker
     private static string VoiceName(string provider, string fallback) =>
         AgentConfig.Setting(provider switch { "gemini" => "GeminiVoice", "alibaba" => "QwenVoice", _ => "OpenAiVoice" }) is { Length: > 0 } v ? v : fallback;
 
-    /// <summary>Gemini native TTS: generateContent with AUDIO modality; the answer is raw 24 kHz mono 16-bit PCM
-    /// (base64), wrapped into a WAV here so the Studio and ffprobe can read it.</summary>
-    private static async Task<(byte[] bytes, string mime)> GeminiTtsAsync(string model, string text, IReadOnlyList<string> keys, CancellationToken ct)
+    /// <summary>Gemini native TTS: generateContent with AUDIO modality, model by model and key by key. The 2.5 and 3.1
+    /// models answer raw 24 kHz mono 16-bit PCM (wrapped into a WAV here so the Studio and ffprobe can read it); the 3.8
+    /// ones answer a finished WAV, used as it is.</summary>
+    private static async Task<(byte[] bytes, string mime, string model)> GeminiTtsAsync(IReadOnlyList<string> models, string text, IReadOnlyList<string> keys, CancellationToken ct)
     {
-        var body = new
+        object Body(string said) => new
         {
-            contents = new[] { new { parts = new[] { new { text } } } },
+            contents = new[] { new { parts = new[] { new { text = said } } } },
             generationConfig = new
             {
                 responseModalities = new[] { "AUDIO" },
                 speechConfig = new { voiceConfig = new { prebuiltVoiceConfig = new { voiceName = VoiceName("gemini", "Kore") } } },
             },
         };
-        var walk = new KeyWalk("gemini");
-        foreach (var key in keys)
-        {
-            if (walk.Resting(key)) continue;
-            try
+        var walk = new KeyWalk("gemini", models.Count, keys.Count);
+        foreach (var model in models)
+            foreach (var key in keys)
             {
-                using var req = new HttpRequestMessage(HttpMethod.Post,
-                    $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={Uri.EscapeDataString(key)}")
-                { Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json") };
-                using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
-                var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                if (!resp.IsSuccessStatusCode) { walk.Refused(key, (int)resp.StatusCode, json); continue; }
-                using var doc = JsonDocument.Parse(json);
-                var part = doc.RootElement.GetProperty("candidates")[0].GetProperty("content").GetProperty("parts")[0];
-                var inline = part.GetProperty("inlineData");
-                var pcm = Convert.FromBase64String(inline.GetProperty("data").GetString() ?? "");
-                var mime = inline.TryGetProperty("mimeType", out var mv) ? mv.GetString() ?? "" : "";
-                var rate = 24000;
-                var ri = mime.IndexOf("rate=", StringComparison.OrdinalIgnoreCase);
-                if (ri >= 0 && int.TryParse(new string(mime[(ri + 5)..].TakeWhile(char.IsDigit).ToArray()), out var r) && r > 0) rate = r;
-                return (WrapPcmAsWav(pcm, rate, 1, 16), "audio/wav");
+                if (walk.Resting(key, model)) continue;
+                try
+                {
+                    for (int attempt = 0; attempt < 2; attempt++)
+                    {
+                        using var req = new HttpRequestMessage(HttpMethod.Post,
+                            $"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={Uri.EscapeDataString(key)}")
+                        { Content = new StringContent(JsonSerializer.Serialize(Body(attempt == 0 ? text : "Say: " + text)), Encoding.UTF8, "application/json") };
+                        using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
+                        var json = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                        if (!resp.IsSuccessStatusCode)
+                        {
+                            // a short line read as a prompt ("Model tried to generate text"): asked once more to say it
+                            if (attempt == 0 && (int)resp.StatusCode == 400 && json.Contains("generate text", StringComparison.OrdinalIgnoreCase)) continue;
+                            walk.Refused(key, model, (int)resp.StatusCode, json);
+                            break;
+                        }
+                        using var doc = JsonDocument.Parse(json);
+                        var part = doc.RootElement.GetProperty("candidates")[0].GetProperty("content").GetProperty("parts")[0];
+                        var inline = part.GetProperty("inlineData");
+                        var audio = Convert.FromBase64String(inline.GetProperty("data").GetString() ?? "");
+                        if (audio.Length >= 4 && audio[0] == 'R' && audio[1] == 'I' && audio[2] == 'F' && audio[3] == 'F') return (audio, "audio/wav", model);
+                        var mime = inline.TryGetProperty("mimeType", out var mv) ? mv.GetString() ?? "" : "";
+                        var rate = 24000;
+                        var ri = mime.IndexOf("rate=", StringComparison.OrdinalIgnoreCase);
+                        if (ri >= 0 && int.TryParse(new string(mime[(ri + 5)..].TakeWhile(char.IsDigit).ToArray()), out var r) && r > 0) rate = r;
+                        return (WrapPcmAsWav(audio, rate, 1, 16), "audio/wav", model);
+                    }
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { walk.Failed(ex); }
             }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { walk.Failed(ex); }
-        }
         throw walk.Error();
     }
 
     /// <summary>Qwen TTS on DashScope (intl first, then the Beijing region): the answer carries a temporary URL of the
     /// finished audio, downloaded before it expires.</summary>
-    private static async Task<(byte[] bytes, string mime)> QwenTtsAsync(string model, string text, IReadOnlyList<string> keys, CancellationToken ct)
+    private static async Task<(byte[] bytes, string mime, string model)> QwenTtsAsync(string model, string text, IReadOnlyList<string> keys, CancellationToken ct)
     {
-        var walk = new KeyWalk("qwen");
+        var walk = new KeyWalk("qwen", 1, keys.Count);
         foreach (var key in keys)
         {
-            if (walk.Resting(key)) continue;
+            if (walk.Resting(key, model)) continue;
             // a key belongs to one region: it is refused only when every region refused it
             (int status, string body)? refused = null;
             foreach (var baseUrl in ClipMaker.DashScopeBases)
@@ -157,25 +180,25 @@ public static class VoiceMaker
                     var url = doc.RootElement.GetProperty("output").GetProperty("audio").GetProperty("url").GetString();
                     if (string.IsNullOrWhiteSpace(url)) throw new InvalidOperationException("qwen tts returned no audio url");
                     var bytes = await Http.GetByteArrayAsync(url, ct).ConfigureAwait(false);
-                    return (bytes, url.Contains(".mp3", StringComparison.OrdinalIgnoreCase) ? "audio/mpeg" : "audio/wav");
+                    return (bytes, url.Contains(".mp3", StringComparison.OrdinalIgnoreCase) ? "audio/mpeg" : "audio/wav", model);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex) { walk.Failed(ex); }
             }
-            if (refused is { } r) walk.Refused(key, r.status, r.body);
+            if (refused is { } r) walk.Refused(key, model, r.status, r.body);
         }
         throw walk.Error();
     }
 
     /// <summary>OpenAI speech (audio/speech) as WAV, so its length is read from the header even without ffprobe.</summary>
-    private static async Task<(byte[] bytes, string mime)> OpenAiTtsAsync(string model, string text, IReadOnlyList<string> keys, string? baseUrl, CancellationToken ct)
+    private static async Task<(byte[] bytes, string mime, string model)> OpenAiTtsAsync(string model, string text, IReadOnlyList<string> keys, string? baseUrl, CancellationToken ct)
     {
         var root = string.IsNullOrWhiteSpace(baseUrl) ? "https://api.openai.com/v1" : baseUrl.TrimEnd('/');
         if (!root.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)) root += "/v1";
-        var walk = new KeyWalk("openai");
+        var walk = new KeyWalk("openai", 1, keys.Count);
         foreach (var key in keys)
         {
-            if (walk.Resting(key)) continue;
+            if (walk.Resting(key, model)) continue;
             try
             {
                 var body = new { model, input = text, voice = VoiceName("openai", "alloy"), response_format = "wav" };
@@ -184,8 +207,8 @@ public static class VoiceMaker
                 req.Headers.TryAddWithoutValidation("Authorization", $"Bearer {key}");
                 using var resp = await Http.SendAsync(req, ct).ConfigureAwait(false);
                 var bytes = await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-                if (!resp.IsSuccessStatusCode) { walk.Refused(key, (int)resp.StatusCode, Encoding.UTF8.GetString(bytes)); continue; }
-                return (bytes, "audio/wav");
+                if (!resp.IsSuccessStatusCode) { walk.Refused(key, model, (int)resp.StatusCode, Encoding.UTF8.GetString(bytes)); continue; }
+                return (bytes, "audio/wav", model);
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { walk.Failed(ex); }
@@ -198,34 +221,37 @@ public static class VoiceMaker
     // quota and one blocked, read as "403 blocked" eight times over (2026-10-09).
     private static readonly ConcurrentDictionary<string, DateTime> _resting = new(StringComparer.Ordinal);
 
-    /// <summary>One walk over a provider's keys: skips the resting ones, and when none answers says what each did.</summary>
-    private sealed class KeyWalk(string provider)
+    /// <summary>One walk over a provider's models and keys: skips the resting ones, and when none answers says what each did.
+    /// A key that is blocked or unknown rests for every model; a used-up quota rests on that model only.</summary>
+    private sealed class KeyWalk(string provider, int models, int keys)
     {
         private readonly List<string> _why = [];
         private int _skipped;
 
-        public bool Resting(string key)
+        public bool Resting(string key, string model)
         {
-            if (!_resting.TryGetValue(key, out var until) || until <= DateTime.UtcNow) return false;
+            var now = DateTime.UtcNow;
+            if ((!_resting.TryGetValue(key, out var all) || all <= now) && (!_resting.TryGetValue(key + "|" + model, out var one) || one <= now)) return false;
             _skipped++;
             return true;
         }
 
-        public void Refused(string key, int status, string body)
+        public void Refused(string key, string model, int status, string body)
         {
             var (why, rest) = Refusal(status, body);
             _why.Add(why);
-            if (rest is { } r) _resting[key] = r == TimeSpan.MaxValue ? DateTime.MaxValue : DateTime.UtcNow + r;
-            Log.Warn($"[voice] {provider} key …{(key.Length > 4 ? key[^4..] : "")}: {why}: {Clip(body.Replace('\n', ' '), 160)}");
+            if (rest is { } r) _resting[r == TimeSpan.MaxValue ? key : key + "|" + model] = r == TimeSpan.MaxValue ? DateTime.MaxValue : DateTime.UtcNow + r;
+            Log.Warn($"[voice] {provider} {model} key …{(key.Length > 4 ? key[^4..] : "")}: {why}: {Clip(body.Replace('\n', ' '), 160)}");
         }
 
         public void Failed(Exception ex) => _why.Add(Clip(ex.Message, 120));
 
         public Exception Error()
         {
-            var parts = _why.GroupBy(w => w).Select(g => $"{g.Count()} key{(g.Count() == 1 ? "" : "s")} {g.Key}").ToList();
-            if (_skipped > 0) parts.Add($"{_skipped} key{(_skipped == 1 ? "" : "s")} still resting after an earlier refusal (quota or blocked)");
-            return new InvalidOperationException($"{provider} tts: " + (parts.Count > 0 ? string.Join(", ", parts) : "no usable key"));
+            var parts = _why.GroupBy(w => w).Select(g => $"{g.Count()}x {g.Key}").ToList();
+            if (_skipped > 0) parts.Add($"{_skipped}x skipped, resting after an earlier refusal (quota or blocked)");
+            var tried = models > 1 ? $"{models} models x {keys} key{(keys == 1 ? "" : "s")}" : $"{keys} key{(keys == 1 ? "" : "s")}";
+            return new InvalidOperationException($"{provider} tts ({tried}): " + (parts.Count > 0 ? string.Join(", ", parts) : "no usable key"));
         }
     }
 

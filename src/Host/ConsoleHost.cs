@@ -925,7 +925,7 @@ public sealed class ConsoleHost
         var clips = ClipMaker.Candidates(_opts);
         var chat = ActiveProfile();
         Console.WriteLine(indent + "chat   (the agent thinks)    " + (chat is null ? "none: /login or /key" : $"{chat.Name} ({chat.Provider}/{ActiveModel()})"));
-        Console.WriteLine(indent + "voice  (\"voice\": true)      " + (voice.Count > 0 ? string.Join(" → ", voice.Select(v => $"{v.Name} ({v.ProviderId}/{v.Model})")) : "none: /voice <profile> on a Gemini, OpenAI or Alibaba API-key profile"));
+        Console.WriteLine(indent + "voice  (\"voice\": true)      " + (voice.Count > 0 ? string.Join(" → ", voice.Select(v => $"{v.Name} ({v.ProviderId}/{v.Model}{(v.Models.Count > 1 ? $", then {v.Models.Count - 1} more models" : "")}, {v.Keys.Count} key{(v.Keys.Count == 1 ? "" : "s")})")) : "none: /voice <profile> on a Gemini, OpenAI or Alibaba API-key profile"));
         Console.WriteLine(indent + "stills ({\"make\":\"still\"})   " + (stills.Count > 0 ? string.Join(" → ", stills.Select(p => $"{p.Name} ({p.Provider})")) : "none: an OpenAI profile (key or login), the Antigravity login or an Alibaba key"));
         Console.WriteLine(indent + "clips  ({\"make\":\"clip\"})    " + (clips.Count > 0 ? string.Join(" → ", clips.Select(c => $"{c.Name} ({c.Model})")) : "none: /key alibaba (DashScope) or DASHSCOPE_API_KEY"));
     }
@@ -1418,6 +1418,9 @@ public sealed class ConsoleHost
         }
         if (model.Length > 0 && !(provider == "anthropic" && profile.Models.Length > 0 && model == def.DefaultModel))
             profile.Models = [model];
+        // a voice model: the provider's other voice models follow it, each with its own free quota per key
+        if (model.Contains("tts", StringComparison.OrdinalIgnoreCase))
+            profile.Models = [.. new[] { model }.Concat(VoiceMaker.DefaultModels(provider)).Distinct(StringComparer.OrdinalIgnoreCase)];
         if (profile.Models.Length == 0) throw new ArgumentException("a model name is required");
         AgentConfig.Upsert(profile);
         Green($"  Saved profile '{profile.Name}' ({profile.Provider}) · {profile.ApiKeys.Length} key(s) · model {profile.Models[0]}");
