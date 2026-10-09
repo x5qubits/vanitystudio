@@ -168,8 +168,11 @@ public static class ImageMaker
 
     // ── Antigravity / Gemini OAuth ────────────────────────────────────────────
 
+    // the daily host first, as the chat transport: for a free-tier Code Assist login (a Google AI Pro account is one) the
+    // other host refuses every model with a bare "Resource has been exhausted", so each picture spent a request there
+    // (probed live 2026-10-09)
     private static readonly string[] AgBaseUrls =
-        ["https://cloudcode-pa.googleapis.com", "https://daily-cloudcode-pa.googleapis.com"];
+        ["https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"];
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _agProject = new();
 
     /// <summary>The login's image models in the order they are tried: the profile's own (or the default), then the
@@ -253,7 +256,10 @@ public static class ImageMaker
                 var raw = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode)
                 {
-                    last = new HttpRequestException($"Antigravity {(int)resp.StatusCode}: {Trim(raw, 240)}");
+                    var refused = new HttpRequestException($"Antigravity {(int)resp.StatusCode}: {Trim(raw, 240)}");
+                    // the host that says when the quota comes back is the one to report (it marks the profile spent until
+                    // then), not a later one that only says "Resource has been exhausted"
+                    if (last is null || (VideoJobs.ResetIn(refused.Message) is not null && VideoJobs.ResetIn(last.Message) is null)) last = refused;
                     continue;
                 }
                 var png = ExtractAgImage(raw);
@@ -266,12 +272,12 @@ public static class ImageMaker
         throw last ?? new InvalidOperationException("Antigravity image failed.");
     }
 
+    // the headers the Antigravity app itself sends, as the chat transport does: the old "antigravity/1.11.5" identity is
+    // refused by the daily host for the chat models (404), and its extra headers are not the app's
     private static void AddAgHeaders(HttpRequestMessage req, string token)
     {
         req.Headers.TryAddWithoutValidation("Authorization", "Bearer " + token);
-        req.Headers.TryAddWithoutValidation("User-Agent", "antigravity/1.11.5 linux/amd64");
-        req.Headers.TryAddWithoutValidation("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1");
-        req.Headers.TryAddWithoutValidation("Client-Metadata", "{\"ideType\":\"ANTIGRAVITY\",\"platform\":\"WINDOWS\",\"pluginType\":\"GEMINI\"}");
+        req.Headers.TryAddWithoutValidation("User-Agent", SingleCallLlmClient.AntigravityUserAgent);
     }
 
     private static async Task<string?> EnsureAgProjectAsync(string token, string? accountId, CancellationToken ct)
