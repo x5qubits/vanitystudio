@@ -269,11 +269,17 @@ public sealed class MakeVideoTool : IVisualTool
         // a vertical platform named in the request is a vertical video, whatever shape the script picked; not when the
         // request names its shape itself: "landscape 16:9 ... reels, posts, logos" listed reels as a feature of the editor
         // and turned a landscape tutorial into a reel (2026-10-09)
+        string? vertical = null;
         if (Regex.Match(request ?? "", @"\b(reels?|tik\s?tok|shorts|stories)\b", RegexOptions.IgnoreCase) is { Success: true } asked
             && !Regex.IsMatch(request ?? "", @"\b(landscape|horizontal|widescreen|square|portrait)\b|\b(16\s*:\s*9|1\s*:\s*1|4\s*:\s*5)\b", RegexOptions.IgnoreCase)
             && Str(script["format"]) is { } shape && shape != "reel" && cat.Formats.Contains("reel"))
+        {
             script["format"] = "reel";
+            vertical = asked.Value;
+        }
         var fixes = Repair(script, cat, _ai());
+        // said out loud: a silent switch left the model fitting pictures to a shape it never chose
+        if (vertical is not null) fixes.Insert(0, $"format is \"reel\": the request names {vertical} (a vertical platform)");
         var errors = Validate(script, cat, _project, _ai());
         if (errors.Count > 0)
             return ([], $"The script was not queued: {errors.Count} problem(s). Fix each one and submit again.\n- " + string.Join("\n- ", errors) + FixesText(fixes), fixes);
