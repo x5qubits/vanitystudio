@@ -1,6 +1,10 @@
-# Vanity Studio CLI
+# AI Video Generator CLI for Ads, Reels & Website Tutorials
 
-**Make and edit videos by asking for them.** Vanity Studio is a command-line video maker. You describe the video:
+**Vanity Studio is an AI-assisted video creation CLI for Windows, macOS, and Linux.** Describe an ad, reel, product demo, or website tutorial in plain language; it writes a script, gathers or creates media, and renders an editable MP4 on your machine through [Vanity Studio](https://photovideoeditor.com/app/).
+
+It is built for creators and small teams who want to make promotional videos from product pages, websites, and local media without assembling every scene by hand. It is a .NET 8 command-line app and supports multiple AI providers for scripts, voice, images, and clips.
+
+For example, ask it to make:
 
 - "a 20 second Facebook ad for this product page"
 - "a tutorial on how to order on my shop"
@@ -152,6 +156,24 @@ the Studio's own video API.
 - Your files go to an AI provider only when a job needs it: a line to speak, or a picture to start an AI clip from.
 - Rendering happens on your machine.
 - `VANITY_STUDIO_PROMPT_LOG=0` turns off the local prompt log.
+
+## Frequently asked questions
+
+### What is Vanity Studio CLI?
+
+Vanity Studio CLI is an AI-assisted video maker that turns plain-language requests, product pages, websites, and local media into editable promotional videos and tutorials.
+
+### What kinds of videos can it create?
+
+It can create product ads, social reels, promos, product demos, logo reveals, presentations, and narrated website walkthroughs. Website tutorials use real browser captures of the site.
+
+### Does it render videos locally?
+
+Yes. The CLI runs a headless browser on your machine and saves the MP4 and editable project in your project folder. It uses the separate Vanity Studio web app as its renderer.
+
+### Which operating systems and AI providers are supported?
+
+The CLI supports Windows, macOS, and Linux with .NET 8 and Chrome or Edge. Script providers include OpenAI, Anthropic, Gemini, Grok, DeepSeek, Mistral, and Ollama; voice, image, and video providers depend on the configured API keys.
 
 ## License
 
