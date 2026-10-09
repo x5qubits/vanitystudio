@@ -540,6 +540,23 @@ public sealed class MakeVideoTool : IVisualTool
                 sc["block"] = nb;
                 fixes.Add($"scenes[{i}]: block \"{bid}\" is \"{nb}\"");
             }
+            // a list block the Studio does not have ("feature-list", "bullets", "benefits"): steps is the one that shows
+            // several points, unnumbered when the script did not say
+            else if (Str(sc["block"]) is { } lb && !cat.ById.ContainsKey(lb) && ListWord.IsMatch(lb)
+                     && cat.ById.TryGetValue("steps", out var steps) && steps.Params.Any(p => p.Name == "items"))
+            {
+                sc["block"] = "steps";
+                if (sc["params"] is JsonObject lp)
+                {
+                    if (lp["items"] is null && lp.FirstOrDefault(kv => kv.Value is JsonArray) is { Key: { } listKey })
+                    {
+                        lp["items"] = lp[listKey]!.DeepClone();
+                        lp.Remove(listKey);
+                    }
+                    if (lp["numbered"] is null && steps.Params.Any(p => p.Name == "numbered")) lp["numbered"] = false;
+                }
+                fixes.Add($"scenes[{i}]: block \"{lb}\" is \"steps\" (the block that shows a list)");
+            }
             if (Str(sc["block"]) is not { } blockId || !cat.ById.TryGetValue(blockId, out var block)) continue;
             var label = $"scenes[{i}] ({block.Id})";
             foreach (var key in sc.Select(kv => kv.Key).Where(k => !SceneKeys.Contains(k)).ToList())
@@ -629,6 +646,8 @@ public sealed class MakeVideoTool : IVisualTool
     private static bool OpensAddress(string name) =>
         name is "target" or "links" || name.Contains("url", StringComparison.OrdinalIgnoreCase) || name.Contains("href", StringComparison.OrdinalIgnoreCase)
         || name.Contains("src", StringComparison.OrdinalIgnoreCase);
+
+    private static readonly Regex ListWord = new(@"list|feature|bullet|benefit|check|point|highlight|pros", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     // the format named the way people say it
     private static string? FormatOf(string said) => Regex.Replace(said.ToLowerInvariant(), @"[\s_-]+", "") switch
@@ -756,7 +775,10 @@ public sealed class MakeVideoTool : IVisualTool
             var blockId = Str(sc["block"]);
             if (blockId is null || !cat.ById.TryGetValue(blockId, out var block))
             {
-                errors.Add($"scenes[{i}]: {(blockId is null ? "no block" : $"unknown block \"{blockId}\"")}; the blocks are listed by make_video action=blocks.");
+                // the names right here: sent to look them up, a model guessed more names, probed with a made-up block and
+                // searched the operator's files for a catalog (2026-10-09)
+                errors.Add($"scenes[{i}]: {(blockId is null ? "no block" : $"unknown block \"{blockId}\"")}; the only blocks are: {string.Join(", ", cat.ById.Keys)}" +
+                           (cat.ById.ContainsKey("steps") ? "; points or features in a list are steps (2-5 items, \"numbered\": false)" : "") + ".");
                 continue;
             }
             var label = $"scenes[{i}] ({block.Id})";
