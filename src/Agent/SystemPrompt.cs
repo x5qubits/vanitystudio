@@ -15,7 +15,7 @@ public static class SystemPrompt
     /// for what cannot be made.</param>
     public static string Build(string workspace, string? model, IEnumerable<string> toolNames, string? memoryBlock, bool subAgent = false,
         PersonaDefinition? persona = null, IReadOnlyList<SkillDefinition>? activeSkills = null, IReadOnlyList<SkillDefinition>? loadableSkills = null,
-        string? media = null)
+        string? media = null, string? blocks = null)
     {
         var sb = new StringBuilder();
         if (persona is not null && persona.SystemPrompt.Length > 0)
@@ -48,6 +48,12 @@ public static class SystemPrompt
             sb.AppendLine();
             sb.AppendLine("# What can be made right now (write the script for this; submit refuses the rest)");
             sb.AppendLine(media.Trim());
+        }
+        if (!string.IsNullOrWhiteSpace(blocks))
+        {
+            sb.AppendLine();
+            sb.AppendLine("# The Studio's blocks (the only ones there are; make_video action=blocks gives every param in full)");
+            sb.AppendLine(blocks.Trim());
         }
 
         foreach (var (file, text) in ProjectInstructions(workspace))
@@ -109,18 +115,19 @@ public static class SystemPrompt
         "web download the product's own pictures (the largest, cleanest ones) and use them in the scenes; when the folder has no brand yet, " +
         "brand save what the page says (name, url, facts), its colours (the first one or two web read lists) and its logo (web download, then " +
         "brand save logo=<path>).\n" +
-        "2. make_video action=blocks: the scenes you can use (once per session is enough; it does not change while you work).\n" +
+        "2. The scenes you can use are the blocks listed under \"The Studio's blocks\" below, with their limits. make_video action=blocks " +
+        "gives every param in full (once per session is enough) when a param you need is not clear from that list.\n" +
         "3. For every picture you will cut a part from or point into, make_video action=look file=<the picture>, and read the point or the box " +
         "off its grid. For a website, make_video action=site url=<address> (clicks=[...], login=true behind a login): its steps and words are " +
         "the ones site lists.\n" +
         "4. Write the script. One scene per moment, in order, each the block that shows it. Every text in the request's language, each inside its " +
-        "limit from make_video action=blocks (a block that shows the line on screen holds the line to that limit too). The first scene says what " +
+        "limit from the blocks list (a block that shows the line on screen holds the line to that limit too). The first scene says what " +
         "the viewer gains, the last what to do. Fields:\n" +
         "   - \"voice\": true for ads over 8 s, tutorials, presentation videos, or lines over 10 words; false for logo reveals and 3-5 s pure visuals, " +
         "and false when no profile can speak (make_video says so).\n" +
         "   - \"brand\": name, url, \"logo\":\"media:logo\" (when the project has a logo), \"colors\": the brand's colours (brand.json, or what web " +
         "read found on its site). The Studio dresses the film in the brand's colour and varies the look per video around it; a brand with no " +
-        "colour and no logo always lands on the same look, so then name \"look\" yourself from make_video action=blocks, one whose summary fits, " +
+        "colour and no logo always lands on the same look, so then name \"look\" yourself from the looks in the blocks list (make_video action=blocks describes each), " +
         "and a different one than the last video unless the brand's signature names one. \"format\": \"reel\" unless the request names another: " +
         "a Facebook or Instagram feed ad or post: portrait (4:5); a story, reel, TikTok or Shorts ad: reel; a square post: square; YouTube or a " +
         "website: landscape.\n" +
@@ -172,6 +179,13 @@ public static class SystemPrompt
 
     private const string Rules =
         "- Act: when a request needs a site read, a picture looked at, a file found or a video made, do it rather than describing how.\n" +
+        "- Get the script right the first time; every refusal costs the operator a step and time. Use only the blocks listed under \"The Studio's " +
+        "blocks\": there are no others, so never invent a block name. Points, features or benefits shown as a list are steps with " +
+        "\"numbered\": false (2 to 5 items, each within its limit); more than five points are two steps scenes, or keep the five that matter. " +
+        "Count the characters of every text against its limit before you submit.\n" +
+        "- Never send a script to find out what is allowed (an empty script, a test, a made-up block or value): what is allowed is written " +
+        "here. Never search the operator's files for the Studio's catalog and never read Vanity Studio's own program files (.dll, .json " +
+        "next to the program, source code): they say nothing about the video.\n" +
         "- Never invent what the brand sells, its prices, claims or numbers: they come from brand read, the operator, or their site. Ask once when " +
         "a fact the video needs is unknown, then keep it with brand save. Every word on screen is a claim, the kicker, label, badge and " +
         "button too: take them from the site's own words (\"free\", \"no account\"), never a filler the site does not say (\"open source\", " +

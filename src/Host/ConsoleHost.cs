@@ -477,9 +477,12 @@ public sealed class ConsoleHost
             {
                 if (!err && Log.Verbose) Dim($"{pad}  ← {tool} {sec.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s, {chars:N0} chars");
             },
-            // a refused step: one line with the first reason (the model reads the whole text and fixes it)
+            // a refused step is the model's to fix, not the operator's to read: it goes to the log, and on screen only with -v
+            // (refusals printed in yellow looked like the product failing, 2026-10-09)
             OnToolError = (tool, text) =>
             {
+                Log.Info($"[refused] {tool}: {Clip(text ?? "", 600)}");
+                if (!Log.Verbose) return;
                 var lines = (text ?? "").Replace("\r", "").Split('\n').Select(l => l.Trim().TrimStart('-').Trim()).Where(l => l.Length > 0).ToList();
                 if (lines.Count > 0 && lines[0].StartsWith("Error:", StringComparison.Ordinal)) lines[0] = lines[0][6..].Trim();
                 // "The script was not queued: 2 problem(s)..." is the header; the problems are what matter
@@ -514,8 +517,9 @@ public sealed class ConsoleHost
         else if (line.StartsWith("making a still")) say = "making AI pictures…";
         else if (line.StartsWith("making a clip")) say = "making AI clips…";
         else if (line.StartsWith("voice ") && line.Contains("spoken")) say = "recording the voice-over…";
-        else if (line.Contains("could not") || line.Contains("used up") || line.Contains("went wrong") || line.Contains("failed"))
-        { Print(ConsoleColor.DarkYellow, $"  #{job.Id} {Clip(line, 140)}"); return; }
+        // a provider's refusal while the job works around it (another profile, a fallback) is the log's; what the video
+        // lost in the end is in its finished block
+        else if (line.Contains("could not") || line.Contains("used up") || line.Contains("went wrong") || line.Contains("failed")) return;
         if (say is null || (_jobSaid.TryGetValue(job.Id, out var had) && had == say)) return;
         _jobSaid[job.Id] = say;
         Print(ConsoleColor.Magenta, $"  #{job.Id} {say}");
@@ -560,8 +564,8 @@ public sealed class ConsoleHost
         // what did not come out as written: a scene that fell back, a picture that could not be made
         var notes = (report["notes"] as JsonArray ?? []).Concat(VideoText.ParseObject(job.AssetsJson)["notes"] as JsonArray ?? [])
             .Select(VideoText.Text).Where(t => t is { Length: > 0 }).Select(t => VideoText.ErrorText(t!)).Distinct().ToList();
-        foreach (var n in notes.Take(3)) print(ConsoleColor.DarkYellow, $"    ! {Clip(n, 150)}");
-        if (notes.Count > 3) print(ConsoleColor.DarkYellow, $"    ! and {notes.Count - 3} more (/job {job.Id})");
+        foreach (var n in notes.Take(3)) dim($"    note: {Clip(Calm(n), 150)}");
+        if (notes.Count > 3) dim($"    note: and {notes.Count - 3} more (/job {job.Id})");
         if (job.Project is not null)
         {
             print(ConsoleColor.Cyan, "    Edit in Vanity Studio (Ctrl+click or copy):");
@@ -570,6 +574,13 @@ public sealed class ConsoleHost
             if (_exitsAfterRender) dim($"    (the link needs Vanity Studio running: vanity-studio edit {job.Id} serves it and opens it)");
         }
     }
+
+    /// <summary>A note on a finished video as the operator reads it: what the video lost, without the picture's prompt and the
+    /// provider's own words (those are in the log and in /job N).</summary>
+    private static string Calm(string note) =>
+        System.Text.RegularExpressions.Regex.Replace(
+            System.Text.RegularExpressions.Regex.Replace(note, @"\s*\(""[^""]*""\)", ""),
+            @"could not be made:.*?(?=\s*The scene uses|$)", "could not be made.", System.Text.RegularExpressions.RegexOptions.Singleline);
 
     private bool _exitsAfterRender;
 
@@ -647,7 +658,7 @@ public sealed class ConsoleHost
             "brand" => preview == "read" ? "reading the brand" : "saving the brand",
             "files" => "looking for files" + (preview.Length > 0 && preview != "list" ? ": " + preview : ""),
             "read_file" => "reading " + Path.GetFileName(preview.TrimEnd('…')),
-            "memory" => "memory" + (preview.Length > 0 ? ": " + preview : ""),
+            "memory" => preview.StartsWith("save") ? "saving a note" : preview.StartsWith("delete") ? "forgetting a note" : "reading notes",
             "skill_view" => "reading a playbook",
             _ => tool + (preview.Length > 0 ? " " + preview : ""),
         };
@@ -902,6 +913,15 @@ public sealed class ConsoleHost
         return sb.ToString().TrimEnd();
     }
 
+    /// <summary>The Studio's blocks, one line each, for the instructions (the catalog is cached ten minutes); none when the
+    /// Studio cannot be reached, and then make_video action=blocks says why.</summary>
+    private static async Task<string?> BlocksBriefAsync(CancellationToken ct)
+    {
+        try { var (cat, _) = await MakeVideoTool.CatalogAsync(ct); return cat is null ? null : MakeVideoTool.Brief(cat); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { Log.Warn("[blocks] " + ex.Message); return null; }
+    }
+
     private void PrintRoles(string indent = "  ")
     {
         var voice = VoiceMaker.Candidates(_opts);
@@ -1018,7 +1038,7 @@ public sealed class ConsoleHost
             if (_personaName is not null) _persona = _library.Persona(_personaName) ?? _persona;
             var (active, loadable) = SkillsFor(_persona, includePinned: true);
             _loop.SystemPrompt = SystemPrompt.Build(_workspace, ActiveModel(), _tools.All.Select(t => t.Name), await MemoryBlockAsync(message, ct),
-                persona: _persona, activeSkills: active, loadableSkills: loadable, media: MediaState());
+                persona: _persona, activeSkills: active, loadableSkills: loadable, media: MediaState(), blocks: await BlocksBriefAsync(ct));
             _request = message;
             // finished videos the conversation has not heard of yet go in front of the operator's words
             var notices = _jobs?.TakeNotices() ?? [];

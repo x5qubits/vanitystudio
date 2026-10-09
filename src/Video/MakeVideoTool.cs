@@ -1161,6 +1161,33 @@ public sealed class MakeVideoTool : IVisualTool
         return sb.ToString().TrimEnd();
     }
 
+    /// <summary>
+    /// Every block in one line: what it shows, when to use it, its params with their limits, its file slots. It goes into the
+    /// instructions every turn, so a script is written from the real blocks: told to look them up, a model guessed names
+    /// ("feature-list", "list"), sent an empty script and a made-up block to read the refusal, and searched the operator's
+    /// files for a catalog (2026-10-09).
+    /// </summary>
+    public static string Brief(VideoCatalog cat) =>
+        $"formats: {string.Join(", ", cat.Formats)}. looks: auto, {string.Join(", ", cat.Looks.Select(l => l.Id))}. music: auto, none, " +
+        $"{string.Join(", ", cat.Moods)}.\n" + string.Join("\n", cat.Blocks.Select(b =>
+    {
+        var what = b.Summary.Split(". ")[0].TrimEnd('.');
+        var use = b.UseWhen.Length > 0 ? $" Use for: {Clip(b.UseWhen, 90)}." : "";
+        var ps = b.Params.Select(x => x.P.Type switch
+        {
+            "string" => x.P.Max is { } m ? $"{x.Name} (≤{N(m)} chars)" : x.Name,
+            "list" => $"{x.Name} ({(x.P.Min is not null || x.P.Max is not null ? Range(x.P.Min, x.P.Max) + " " : "")}items{(x.P.ItemMax is { } im ? $", each ≤{N(im)} chars" : "")})",
+            "enum" => $"{x.Name} ({string.Join("|", x.P.Options)})",
+            "bool" => $"{x.Name} (true|false)",
+            _ => x.Name,
+        });
+        var files = b.Files.Select(f => f.Name + (f.S.Required ? " (required)" : ""));
+        return $"- {b.Id}{(b.Overlay ? " (an overlay on the previous scene, never first)" : "")}: {what}.{use} params: {string.Join(", ", ps)}" +
+               (b.Files.Count > 0 ? $"; files: {string.Join(", ", files)}" : "");
+    }));
+
+    private static string Clip(string s, int max) => s.Length <= max ? s : s[..(max - 1)].TrimEnd() + "…";
+
     private static string TypeText(VideoCatalog.Param p) => p.Type switch
     {
         "string" => "text" + (p.Max is { } m ? $", at most {N(m)} characters" : "") + (p.Line ? ", shows the line" : "") +
