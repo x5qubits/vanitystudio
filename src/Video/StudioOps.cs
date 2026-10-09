@@ -1320,8 +1320,9 @@ namespace VanityStudio.Video
                     int skip = Math.Max(0, want - real);                  // rows of this screen the picture already has
                     int take = Math.Min(h - skip, capH - filled);
                     if (take <= 0) break;
-                    canvas.DrawBitmap(bmp, new SkiaSharp.SKRect(0, (float)(skip * sk), bmp.Width, (float)((skip + take) * sk)),
-                        new SkiaSharp.SKRect(0, (float)(filled * ky), pw, (float)((filled + take) * ky)));
+                    using (var img = SkiaSharp.SKImage.FromBitmap(bmp))
+                        canvas.DrawImage(img, new SkiaSharp.SKRect(0, (float)(skip * sk), bmp.Width, (float)((skip + take) * sk)),
+                            new SkiaSharp.SKRect(0, (float)(filled * ky), pw, (float)((filled + take) * ky)), new SkiaSharp.SKSamplingOptions(SkiaSharp.SKFilterMode.Linear));
                     filled += take;
                 }
                 if (screen == 0) await cdp.EvalAsync(HideFixedJs, ct).ConfigureAwait(false);

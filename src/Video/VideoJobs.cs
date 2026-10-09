@@ -826,8 +826,8 @@ public sealed class VideoJobs : IDisposable
                 case "queued":
                 case "running":
                     var pct = Convert.ToDouble(e!.GetValueOrDefault("pct") ?? 0, System.Globalization.CultureInfo.InvariantCulture) / 100.0;
-                    var stage = state == "queued" ? "queued" : Convert.ToString(e.GetValueOrDefault("stage")) is { Length: > 0 } s ? s : "running";
-                    next = r with { Pct = pct, RenderStage = stage, Position = state == "queued" ? Convert.ToInt32(e.GetValueOrDefault("position") ?? 0) : null, Error = null };
+                    var stage = state == "queued" ? "queued" : Convert.ToString(e!.GetValueOrDefault("stage")) is { Length: > 0 } s ? s : "running";
+                    next = r with { Pct = pct, RenderStage = stage, Position = state == "queued" ? Convert.ToInt32(e!.GetValueOrDefault("position") ?? 0) : null, Error = null };
                     var line = state == "queued" ? $"waiting for the renderer (number {next.Position} in line)" : $"{stage} {Math.Round(pct * 100 / 10) * 10:0}%";
                     if (!_lastLine.TryGetValue(r.Id, out var prev) || prev != line) { _lastLine[r.Id] = line; Say(next, line); }
                     break;
@@ -840,8 +840,8 @@ public sealed class VideoJobs : IDisposable
                     next = r with
                     {
                         AssetsJson = assets.ToJsonString(), Stage = VideoJob.Collect, Pct = 1, RenderStage = "done", Position = null,
-                        Duration = Convert.ToDouble(e.GetValueOrDefault("duration") ?? 0, System.Globalization.CultureInfo.InvariantCulture),
-                        Bytes = Convert.ToInt64(e.GetValueOrDefault("bytes") ?? 0L, System.Globalization.CultureInfo.InvariantCulture),
+                        Duration = Convert.ToDouble(e!.GetValueOrDefault("duration") ?? 0, System.Globalization.CultureInfo.InvariantCulture),
+                        Bytes = Convert.ToInt64(e!.GetValueOrDefault("bytes") ?? 0L, System.Globalization.CultureInfo.InvariantCulture),
                     };
                     wake = true;
                     break;

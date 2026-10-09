@@ -10,8 +10,6 @@
     <Version>1.0.1</Version>
     <LangVersion>latest</LangVersion>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <!-- The copied runtime is annotated for nullable but a few paths rely on runtime checks; keep the build quiet. -->
-    <NoWarn>$(NoWarn);CS1591;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625;CS8619;CS8620;CS0168;CS0219;CS1998</NoWarn>
     <RollForward>Major</RollForward>
   </PropertyGroup>
 

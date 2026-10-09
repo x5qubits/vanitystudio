@@ -36,8 +36,6 @@ public sealed class MakeVideoTool : IVisualTool
         _project = project; _jobs = jobs; _ai = ai; _request = request;
     }
 
-    /// <summary>Test seam: the catalog's JSON, instead of fetching it from the Studio.</summary>
-    internal static string? CatalogOverride;
     private static readonly ConcurrentDictionary<string, (DateTime at, string json)> _catalogCache = new();
     private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(20) };
 
@@ -1047,8 +1045,7 @@ public sealed class MakeVideoTool : IVisualTool
     {
         var studio = StudioUrl();
         string json;
-        if (CatalogOverride != null) json = CatalogOverride;
-        else if (_catalogCache.TryGetValue(studio, out var c) && c.at > DateTime.UtcNow.AddMinutes(-10)) json = c.json;
+        if (_catalogCache.TryGetValue(studio, out var c) && c.at > DateTime.UtcNow.AddMinutes(-10)) json = c.json;
         else
         {
             try
@@ -1064,7 +1061,7 @@ public sealed class MakeVideoTool : IVisualTool
         {
             var cat = VideoCatalog.Parse(json);
             if (cat.Blocks.Count == 0) return (null, NoCatalog(studio, "it lists no blocks"));
-            if (CatalogOverride == null) _catalogCache[studio] = (DateTime.UtcNow, json);
+            _catalogCache[studio] = (DateTime.UtcNow, json);
             return (cat, null);
         }
         catch (Exception ex) { return (null, NoCatalog(studio, "what it serves there is not a catalog: " + ex.Message)); }

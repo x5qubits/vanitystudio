@@ -352,14 +352,39 @@ public sealed class ConsoleHost
         if (_jobs is not null && string.Equals(_jobs.Project.Root, _workspace, StringComparison.OrdinalIgnoreCase)) return;
         _jobs?.Dispose();
         _project = new StudioProject(_workspace);
+        _project.AdoptHomeState();
         _jobs = new VideoJobs(_project, () => _opts);
         _jobs.OnEvent += JobEvent;
         _jobs.OnRenderLog = line => { if (Log.Verbose) Print(ConsoleColor.DarkGray, "  " + line); };
         _jobs.EditLink = id => EditServer().EditLink(id);
         _jobs.Start();
         var open = _jobs.Store.All().Where(j => j.Open).ToList();
-        if (_jobs.Passive) Dim("  [another Vanity Studio session is open in this folder: it makes the videos asked for here, and shows their progress]");
-        else if (open.Count > 0) Dim($"  [{open.Count} video job(s) of this folder resume: {string.Join(", ", open.Select(j => "#" + j.Id))}]");
+        _openNote = _jobs.Passive ? "  [another Vanity Studio session is open in this folder: it makes the videos asked for here, and shows their progress]"
+                  : open.Count > 0 ? $"  [{open.Count} video job(s) of this folder resume: {string.Join(", ", open.Select(j => "#" + j.Id))}]" : null;
+        if (_started) PrintOpenNote();
+    }
+
+    // Until the banner (or a command's first line) is out, the resume note and the jobs' events wait: they came above
+    // the banner and in the middle of it (2026-10-09).
+    private string? _openNote;
+    private volatile bool _started;
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(VideoJob Job, string Line)> _heldEvents = new();
+
+    private void PrintOpenNote()
+    {
+        if (_openNote is { } note) Print(ConsoleColor.DarkGray, note);
+        _openNote = null;
+    }
+
+    /// <summary>The session is on screen: the resume note, then what the jobs said meanwhile, then everything as it comes.</summary>
+    private void Started()
+    {
+        PrintOpenNote();
+        lock (_heldEvents)
+        {
+            _started = true;
+            while (_heldEvents.TryDequeue(out var e)) JobEvent(e.Job, e.Line);
+        }
     }
 
     private void Build()
@@ -474,6 +499,9 @@ public sealed class ConsoleHost
 
     private void JobEvent(VideoJob job, string line)
     {
+        if (!_started)
+            lock (_heldEvents)
+                if (!_started) { _heldEvents.Enqueue((job, line)); return; }
         if (line.StartsWith("✓") || line.StartsWith("✗")) { PrintFinished(job); return; }
         if (Log.Verbose) { Print(ConsoleColor.DarkMagenta, $"  #{job.Id} {line}"); return; }
         // the progress worth a line: rendering started, the site being captured, a made picture or voice that failed,
@@ -498,20 +526,28 @@ public sealed class ConsoleHost
     private void PrintFinished(VideoJob job)
     {
         _jobSaid.TryRemove(job.Id, out _);
-        Print(ConsoleColor.Gray, "");
+        // one block, written at once: line by line, the prompt written back after each line came between them
+        // ("You:     1 title-card ...", 2026-10-09)
+        var block = new List<(ConsoleColor, string)> { (ConsoleColor.Gray, "") };
+        try { Finished(job, (color, text) => block.Add((color, text)), text => block.Add((ConsoleColor.DarkGray, text))); }
+        finally { PrintBlock(block); }
+    }
+
+    private void Finished(VideoJob job, Action<ConsoleColor, string> print, Action<string> dim)
+    {
         if (job.Status != VideoJob.Done)
         {
-            Print(ConsoleColor.Red, $"  ✗ {job.Title} · job #{job.Id} was not made");
-            Print(ConsoleColor.DarkYellow, $"    {Clip(VideoText.ErrorText(job.Error ?? "it stopped without a reason"), 300)}");
+            print(ConsoleColor.Red, $"  ✗ {job.Title} · job #{job.Id} was not made");
+            print(ConsoleColor.DarkYellow, $"    {Clip(VideoText.ErrorText(job.Error ?? "it stopped without a reason"), 300)}");
             return;
         }
         var script = VideoText.ParseObject(job.ScriptJson);
         var report = VideoText.ParseObject(job.ReportJson ?? "{}");
         var format = VideoText.Str(script["format"]) ?? (job.Kind == "doc" ? "project" : "reel");
         var secs = (VideoText.Num(report["duration"]) ?? job.Duration).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
-        Print(ConsoleColor.Green, $"  ✓ {job.Title} · {secs} s · {format} · job #{job.Id}");
+        print(ConsoleColor.Green, $"  ✓ {job.Title} · {secs} s · {format} · job #{job.Id}");
         var folder = job.OutDir is null ? "" : job.OutDir.Replace('/', Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        Print(ConsoleColor.Gray, $"    {folder,-52} /open {job.Id} · /folder {job.Id}");
+        print(ConsoleColor.Gray, $"    {folder,-52} /open {job.Id} · /folder {job.Id}");
         var scenes = (report["scenes"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
         var written = (script["scenes"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
         for (int i = 0; i < Math.Max(scenes.Count, written.Count); i++)
@@ -519,19 +555,19 @@ public sealed class ConsoleHost
             var r = i < scenes.Count ? scenes[i] : null; var w = i < written.Count ? written[i] : null;
             var block = VideoText.Str(r?["block"]) ?? VideoText.Str(w?["block"]) ?? "";
             var line = (VideoText.Str(r?["line"]) ?? VideoText.Str(w?["line"]) ?? "").Replace("*", "");
-            Dim($"    {i + 1} {block,-16} {Clip(line, 90)}");
+            dim($"    {i + 1} {block,-16} {Clip(line, 90)}");
         }
         // what did not come out as written: a scene that fell back, a picture that could not be made
         var notes = (report["notes"] as JsonArray ?? []).Concat(VideoText.ParseObject(job.AssetsJson)["notes"] as JsonArray ?? [])
             .Select(VideoText.Text).Where(t => t is { Length: > 0 }).Select(t => VideoText.ErrorText(t!)).Distinct().ToList();
-        foreach (var n in notes.Take(3)) Print(ConsoleColor.DarkYellow, $"    ! {Clip(n, 150)}");
-        if (notes.Count > 3) Print(ConsoleColor.DarkYellow, $"    ! and {notes.Count - 3} more (/job {job.Id})");
+        foreach (var n in notes.Take(3)) print(ConsoleColor.DarkYellow, $"    ! {Clip(n, 150)}");
+        if (notes.Count > 3) print(ConsoleColor.DarkYellow, $"    ! and {notes.Count - 3} more (/job {job.Id})");
         if (job.Project is not null)
         {
-            Print(ConsoleColor.Cyan, "    Edit in Vanity Studio (Ctrl+click or copy):");
-            Print(ConsoleColor.Cyan, $"    {EditServer().EditLink(job.Id)}");
+            print(ConsoleColor.Cyan, "    Edit in Vanity Studio (Ctrl+click or copy):");
+            print(ConsoleColor.Cyan, $"    {EditServer().EditLink(job.Id)}");
             // a command that exits takes the link server with it
-            if (_exitsAfterRender) Dim($"    (the link needs Vanity Studio running: vanity-studio edit {job.Id} serves it and opens it)");
+            if (_exitsAfterRender) dim($"    (the link needs Vanity Studio running: vanity-studio edit {job.Id} serves it and opens it)");
         }
     }
 
@@ -619,14 +655,21 @@ public sealed class ConsoleHost
 
     /// <summary>One line from any thread: the spinner's line is cleared first, and the prompt is written again when the
     /// operator was at it.</summary>
-    private void Print(ConsoleColor color, string text)
+    private void Print(ConsoleColor color, string text) => PrintBlock([(color, text)]);
+
+    /// <summary>Lines from any thread, written together: the spinner's or the prompt's line is cleared once, and the
+    /// prompt is written back once, after the last line.</summary>
+    private void PrintBlock(IReadOnlyList<(ConsoleColor Color, string Text)> lines)
     {
         lock (ConsoleGate)
         {
             if (!Console.IsOutputRedirected) Console.Write("\r" + new string(' ', Math.Max(0, Math.Min(Console.BufferWidth - 1, 100))) + "\r");
             if (_streamKind is not null) { Console.WriteLine(); _streamKind = null; }
-            Console.ForegroundColor = color;
-            Console.WriteLine(text);
+            foreach (var (color, text) in lines)
+            {
+                Console.ForegroundColor = color;
+                Console.WriteLine(text);
+            }
             Console.ResetColor();
             if (_atPrompt) { Console.ForegroundColor = ConsoleColor.Cyan; Console.Write("You: "); Console.ResetColor(); }
         }
@@ -773,6 +816,7 @@ public sealed class ConsoleHost
         var file = Path.GetFullPath(_o.CommandArgs[0]);
         if (!File.Exists(file)) { Red("  no such file: " + file); return 2; }
         OpenProject();
+        Started();
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
         var text = await File.ReadAllTextAsync(file);
@@ -884,6 +928,7 @@ public sealed class ConsoleHost
     {
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+        Started();
         var reply = await TurnAsync(prompt, cts.Token, printReply: false);
         if (reply is null) return 1;
         Console.WriteLine(reply);
@@ -905,8 +950,10 @@ public sealed class ConsoleHost
         Cyan("  Vanity Studio " + Version + " · " + _workspace);
         Dim($"  profile: {p?.Name} ({p?.Provider}/{ActiveModel()})" + (OAuthTokenRefresher.UsesOAuth(p!) ? " · signed in" + (string.IsNullOrEmpty(p!.OAuthAccountId) ? "" : " as " + p.OAuthAccountId) : " · api key"));
         PrintContextLine();
+        PrintOpenNote();
         Dim("  Ask for a video (\"a 20 s reel for my bakery, use the photos on my desktop\") · /help for commands · Ctrl+C stops the current request");
         Console.WriteLine();
+        Started();
 
         Console.CancelKeyPress += (_, e) =>
         {
@@ -1244,8 +1291,8 @@ public sealed class ConsoleHost
         var existing = AgentConfig.Load().Profiles.FirstOrDefault(p => p.Name.Equals(profileName, StringComparison.OrdinalIgnoreCase));
         if (existing is { Models.Length: > 0 }) profile.Models = existing.Models;
         AgentConfig.Upsert(profile);
-        Green($"  Signed in: profile '{profile.Name}' ({profile.Provider}" + (string.IsNullOrEmpty(profile.OAuthAccountId) ? "" : ", " + profile.OAuthAccountId) + $") · model {profile.Models.FirstOrDefault()}");
-        Dim("  /model <name> changes the model; /models lists what the login can use.");
+        // one line (/help shows /model and /models)
+        Green($"  Signed in as {(string.IsNullOrEmpty(profile.OAuthAccountId) ? profile.Name : profile.OAuthAccountId)} ({profile.Provider} · {profile.Models.FirstOrDefault()})");
     }
 
     private static readonly (string Id, string Label, string DefaultModel)[] KeyProviders =

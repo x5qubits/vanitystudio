@@ -244,7 +244,7 @@ public static class OAuthFlows
         cts.CancelAfter(TimeSpan.FromMinutes(10));
         var listener = ListenForCodeAsync(port, state, cts.Token);
         var pasted   = ui.Ask("  Paste the redirected URL or code here (or wait for the browser): ", cts.Token);
-        var done     = await Task.WhenAny(listener, pasted);
+        var done     = await Task.WhenAny((Task)listener, pasted);
         string code;
         if (done == listener)
         {

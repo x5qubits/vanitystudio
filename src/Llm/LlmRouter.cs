@@ -461,9 +461,6 @@ public sealed class LlmRouter : ILlmClient
     /// one was refused outright. Tests lower it to drive the walk without real waits.</summary>
     internal static double SlowFailureSeconds = 10;
 
-    /// <summary>Tests only: every HttpClient the router creates gets this handler instead of the network.</summary>
-    internal static Func<HttpMessageHandler>? TestHandler;
-
     private HttpClient HttpFor(AiProfile profile, string key)
     {
         string cacheKey = string.Join("\u001f", profile.Name, profile.Provider, profile.BaseUrl,
@@ -478,7 +475,7 @@ public sealed class LlmRouter : ILlmClient
                 _httpClients.Remove(victim.Key);
                 try { victim.Value.Dispose(); } catch { }
             }
-            var created = TestHandler is { } h ? new HttpClient(h(), disposeHandler: true) : new HttpClient();
+            var created = new HttpClient();
             _httpClients[cacheKey] = created;
             return created;
         }

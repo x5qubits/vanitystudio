@@ -31,6 +31,32 @@ public sealed class StudioProject
     public string ConfigDir => PromptLibrary.ProjectDir(Root);
     public string StateDir => PromptLibrary.HasProjectDir(Root) ? ConfigDir : AgentConfig.ProjectDir(Root);
     public string JobsDir => System.IO.Path.Combine(StateDir, "jobs");
+
+    /// <summary>
+    /// The state a session kept under the studio home while this folder had no .vanity-studio of its own, moved into it
+    /// once it has one. The brand saved on a first request creates that folder, and the next session looked only there:
+    /// its jobs, the edit links and /open of the videos already made were gone (2026-10-09). A file the folder already
+    /// has stays where it is; nothing moves while a session still works the home copy's jobs.
+    /// </summary>
+    public void AdoptHomeState()
+    {
+        if (!PromptLibrary.HasProjectDir(Root)) return;
+        var home = AgentConfig.ProjectDir(Root);
+        try
+        {
+            var lockFile = System.IO.Path.Combine(home, "jobs", ".session.lock");
+            if (File.Exists(lockFile)) using (new FileStream(lockFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+        }
+        catch (IOException) { return; }
+        foreach (var file in Directory.EnumerateFiles(home, "*", SearchOption.AllDirectories))
+        {
+            if (System.IO.Path.GetFileName(file) == ".session.lock") continue;
+            var target = System.IO.Path.Combine(ConfigDir, System.IO.Path.GetRelativePath(home, file));
+            if (File.Exists(target)) continue;
+            try { Directory.CreateDirectory(System.IO.Path.GetDirectoryName(target)!); File.Move(file, target); }
+            catch (Exception ex) { Log.Warn($"[project] {file} stays under the studio home: {ex.Message}"); }
+        }
+    }
     public string MediaDir => System.IO.Path.Combine(Root, "media");
     public string MadeDir => System.IO.Path.Combine(MediaDir, "made");
     public string VideosDir => System.IO.Path.Combine(Root, "videos");
