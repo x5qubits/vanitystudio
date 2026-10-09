@@ -41,9 +41,10 @@ public static class OAuthConfig
     {
         "openai"      => ["gpt-5.5", "gpt-5.5-mini"],
         "grok"        => ["grok-4.5"],
-        // Fast first: the pro/high model waits tens of seconds in the queue before its first token. A name the tier
-        // does not serve is jailed by the router and the next one is tried, so the list degrades by itself.
-        "antigravity" => ["gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.1-pro-high"],
+        // Flash with high thinking first (Antigravity's own default agent model): flash-low wrote scripts with guessed
+        // blocks and empty submits (2026-10-09); pro waits tens of seconds in the queue before its first token. A name
+        // the tier does not serve is jailed by the router and the next one is tried, so the list degrades by itself.
+        "antigravity" => ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low", "gemini-3.1-pro-high"],
         "anthropic"   => ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-4-5-20251001"],
         _             => [],
     };
