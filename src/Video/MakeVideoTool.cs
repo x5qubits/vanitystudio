@@ -242,36 +242,40 @@ public sealed class MakeVideoTool : IVisualTool
         if (args.TryGetProperty("script", out var se))
             text = se.ValueKind == JsonValueKind.String ? se.GetString() ?? "" : se.ValueKind == JsonValueKind.Object ? se.GetRawText() : "";
         if (text.Trim().Length == 0) return Fail(id, "submit needs script: the video's script as JSON text.");
-        var (ids, problem) = await QueueScriptAsync(text, _request(), ct).ConfigureAwait(false);
+        var (ids, problem, fixes) = await QueueScriptAsync(text, _request(), ct).ConfigureAwait(false);
         if (problem is not null) return Fail(id, problem);
         var head = ids.Count == 1 ? $"Video job #{ids[0]} queued" : $"{ids.Count} takes queued: " + string.Join(", ", ids.Select(x => "#" + x));
         return Ok(id, $"{head}. {(ids.Count == 1 ? "It renders" : "They render")} in the background on this machine; the finished video{(ids.Count == 1 ? " is" : "s are")} " +
-                      "saved under videos/ and reported here when ready.");
+                      "saved under videos/ and reported here when ready." + FixesText(fixes));
     }
 
-    /// <summary>Validates a script and queues it (several jobs for takes). Returns the job numbers, or the problems.
-    /// Used by submit and by `vanity-studio render`.</summary>
-    public async Task<(List<long> ids, string? problem)> QueueScriptAsync(string text, string request, CancellationToken ct)
+    private static string FixesText(List<string> fixes) =>
+        fixes.Count == 0 ? "" : "\nFixed in the script before it was queued (say so only if it changes what the operator asked for):\n- " + string.Join("\n- ", fixes);
+
+    /// <summary>Repairs, checks and queues a script (several jobs for takes). Returns the job numbers, or the problems,
+    /// and what was repaired. Used by submit and by `vanity-studio render`.</summary>
+    public async Task<(List<long> ids, string? problem, List<string> fixes)> QueueScriptAsync(string text, string request, CancellationToken ct)
     {
         JsonNode? node;
         try { node = ParseScript(text); }
-        catch (JsonException ex) { return ([], ScriptError(text, ex)); }
-        catch (Exception ex) { return ([], "script is not valid JSON: " + ex.Message); }
-        if (node is not JsonObject script) return ([], "script must be one JSON object.");
+        catch (JsonException ex) { return ([], ScriptError(text, ex), []); }
+        catch (Exception ex) { return ([], "script is not valid JSON: " + ex.Message, []); }
+        if (node is not JsonObject script) return ([], "script must be one JSON object.", []);
         // the brand's colours from brand.json when the script names the brand but not its colours: without a colour (or
         // a logo) the Studio puts every film of a treatment on the same look
         if (script["brand"] is JsonObject sb && sb["colors"] is null && _project.Brand()["colors"] is JsonArray known && known.Count > 0)
             sb["colors"] = known.DeepClone();
 
         var (cat, catError) = await CatalogAsync(ct).ConfigureAwait(false);
-        if (cat is null) return ([], catError!);
-        var errors = Validate(script, cat, _project, _ai());
+        if (cat is null) return ([], catError!, []);
         // a vertical platform named in the request is a vertical video, whatever shape the script picked
         if (Regex.Match(request ?? "", @"\b(reels?|tik\s?tok|shorts|stories)\b", RegexOptions.IgnoreCase) is { Success: true } asked
-            && Str(script["format"]) is { } shape && shape != "reel" && cat.Formats.Contains(shape))
-            errors.Add($"format: the request names \"{asked.Value}\", a vertical video: use \"reel\" (9:16), not \"{shape}\".");
+            && Str(script["format"]) is { } shape && shape != "reel" && cat.Formats.Contains("reel"))
+            script["format"] = "reel";
+        var fixes = Repair(script, cat, _ai());
+        var errors = Validate(script, cat, _project, _ai());
         if (errors.Count > 0)
-            return ([], $"The script was not queued: {errors.Count} problem(s). Fix each one and submit again.\n- " + string.Join("\n- ", errors));
+            return ([], $"The script was not queued: {errors.Count} problem(s). Fix each one and submit again.\n- " + string.Join("\n- ", errors) + FixesText(fixes), fixes);
 
         var title = Str(script["title"])!.Trim();
         // takes: several variants of the SAME script with different seeds, numbered titles "(take 1 of 3)"; each comes back
@@ -291,7 +295,7 @@ public sealed class MakeVideoTool : IVisualTool
             }
             ids.Add(_jobs.Queue(scriptN, request ?? ""));
         }
-        return (ids, null);
+        return (ids, null, fixes);
     }
 
     // ── remix: patch an existing job's script and queue a new render that REUSES every voice line and AI picture whose
@@ -347,8 +351,10 @@ public sealed class MakeVideoTool : IVisualTool
 
         var (cat, catError) = await CatalogAsync(ct).ConfigureAwait(false);
         if (cat is null) return Fail(id, catError!);
+        var fixes = Repair(script, cat, _ai());
         var errors = Validate(script, cat, _project, _ai());
-        if (errors.Count > 0) return Fail(id, $"The remix was not queued: {errors.Count} problem(s) in the patched script.\n- " + string.Join("\n- ", errors));
+        if (errors.Count > 0) return Fail(id, $"The remix was not queued: {errors.Count} problem(s) in the patched script.\n- " + string.Join("\n- ", errors) + FixesText(fixes));
+        applied.AddRange(fixes.Select(f => "fixed: " + f));
 
         var title = (Str(script["title"]) ?? prev.Title ?? "Video").Trim();
         if (!title.Contains("remix", StringComparison.OrdinalIgnoreCase)) title += " (remix)";
@@ -462,6 +468,178 @@ public sealed class MakeVideoTool : IVisualTool
     private static readonly string[] BrandKeys = { "name", "logo", "url", "colors" };
     private static readonly string[] MakeKeys = { "make", "prompt", "from" };
     private const string FileForms = StudioProject.FileForms;
+
+    /// <summary>
+    /// Repairs, before the checks, the slips that have only one right answer, so a model never spends a step on them:
+    /// a file slot named after the wrong word when the block has one slot of that kind (device-mockup's "picture" is its
+    /// "screen"), a block or a param named a letter or two off, a format said as "9:16" or "story", a number or a yes/no
+    /// written as text, a single text where a list is taken, an unknown look, music or treatment (back to auto), colours
+    /// that are not colours, a field a script does not have, a voice-over nobody can speak. Returns what was changed;
+    /// what cannot be repaired safely (a text over its limit, a missing file) is left for the checks to name.
+    /// </summary>
+    internal static List<string> Repair(JsonObject script, VideoCatalog cat, AiOptions ai)
+    {
+        var fixes = new List<string>();
+        script["script"] ??= 1;
+        // the format, said in other words
+        if (Str(script["format"]) is { } fmt && !cat.Formats.Contains(fmt) && FormatOf(fmt) is { } shape && cat.Formats.Contains(shape))
+        {
+            script["format"] = shape;
+            fixes.Add($"format \"{fmt}\" is \"{shape}\"");
+        }
+        // fields a script does not have
+        foreach (var key in script.Select(kv => kv.Key).Where(k => !ScriptKeys.Contains(k)).ToList())
+        {
+            var near = Closest(key, ScriptKeys);
+            if (near is not null && script[near] is null) { script[near] = script[key]?.DeepClone(); fixes.Add($"\"{key}\" is \"{near}\""); }
+            else fixes.Add($"\"{key}\" is not part of a script: left out");
+            script.Remove(key);
+        }
+        Coerce(script, "voice", "bool", fixes, "voice");
+        foreach (var k in new[] { "seed", "takes", "speed", "textSoftness" }) Coerce(script, k, "number", fixes, k);
+        if (Bool(script["voice"]) == true && VoiceMaker.Candidates(ai).Count == 0)
+        {
+            script["voice"] = false;
+            fixes.Add("voice: no profile can speak, so the video has no voice-over (the music and the words on screen carry it)");
+        }
+        if (Str(script["look"]) is { } lk && lk != "auto" && !cat.Looks.Any(l => l.Id == lk))
+        {
+            var near = Closest(lk, cat.Looks.Select(l => l.Id));
+            script["look"] = near ?? "auto";
+            fixes.Add($"look \"{lk}\" is " + (near is null ? "not a look: auto" : $"\"{near}\""));
+        }
+        if (Str(script["music"]) is { } mu && mu is not ("auto" or "none") && !cat.Moods.Contains(mu) && !cat.Music.Contains(mu))
+        {
+            var near = Closest(mu, cat.Moods.Concat(cat.Music));
+            script["music"] = near ?? "auto";
+            fixes.Add($"music \"{mu}\" is " + (near is null ? "not a mood or a bed: auto" : $"\"{near}\""));
+        }
+        if (Str(script["treatment"]) is { } tr && !Treatments.Contains(tr))
+        {
+            var near = Closest(tr, Treatments);
+            if (near is null) script.Remove("treatment"); else script["treatment"] = near;
+            fixes.Add($"treatment \"{tr}\" is " + (near is null ? "not a treatment: left out" : $"\"{near}\""));
+        }
+        if (script["brand"] is JsonObject brand)
+        {
+            foreach (var key in brand.Select(kv => kv.Key).Where(k => !BrandKeys.Contains(k)).ToList()) { brand.Remove(key); fixes.Add($"brand.{key} is not part of brand: left out"); }
+            if (brand["colors"] is JsonValue one && Str(one) is { } c1) brand["colors"] = new JsonArray(c1);
+            if (brand["colors"] is JsonArray colors)
+            {
+                var good = colors.Select(Str).Where(c => c is not null && Regex.IsMatch(c, "^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$")).ToList();
+                if (good.Count != colors.Count) { fixes.Add("brand.colors: only #rrggbb colours are kept"); brand["colors"] = new JsonArray(good.Select(c => (JsonNode?)c).ToArray()); }
+                if (good.Count == 0) brand.Remove("colors");
+            }
+        }
+        if (script["scenes"] is not JsonArray scenes) return fixes;
+        for (int i = 0; i < scenes.Count; i++)
+        {
+            if (scenes[i] is not JsonObject sc) continue;
+            // the block, named a little off
+            if (Str(sc["block"]) is { } bid && !cat.ById.ContainsKey(bid) && Closest(bid, cat.ById.Keys) is { } nb)
+            {
+                sc["block"] = nb;
+                fixes.Add($"scenes[{i}]: block \"{bid}\" is \"{nb}\"");
+            }
+            if (Str(sc["block"]) is not { } blockId || !cat.ById.TryGetValue(blockId, out var block)) continue;
+            var label = $"scenes[{i}] ({block.Id})";
+            foreach (var key in sc.Select(kv => kv.Key).Where(k => !SceneKeys.Contains(k)).ToList())
+            {
+                // a param or a file slot written at the scene's level goes where it belongs
+                if (block.Params.Any(p => p.Name == key)) { (sc["params"] as JsonObject ?? (JsonObject)(sc["params"] = new JsonObject()))[key] = sc[key]?.DeepClone(); fixes.Add($"{label}: {key} is a param: moved into params"); }
+                else if (block.Files.Any(f => f.Name == key)) { (sc["files"] as JsonObject ?? (JsonObject)(sc["files"] = new JsonObject()))[key] = sc[key]?.DeepClone(); fixes.Add($"{label}: {key} is a file slot: moved into files"); }
+                else fixes.Add($"{label}: \"{key}\" is not part of a scene: left out");
+                sc.Remove(key);
+            }
+            if (Str(sc["look"]) is { } sl && !cat.Looks.Any(l => l.Id == sl)) { sc.Remove("look"); fixes.Add($"{label}: look \"{sl}\" is not a look: the film's look"); }
+            if (sc["params"] is JsonObject ps)
+                foreach (var name in ps.Select(kv => kv.Key).ToList())
+                {
+                    if (block.Params.Any(p => p.Name == name)) continue;
+                    if (name == "links" && block.Params.Any(p => p.Name == "url")) continue;
+                    var value = ps[name]?.DeepClone();
+                    ps.Remove(name);
+                    // a file given as a param goes into its slot
+                    if (block.Files.Any(f => f.Name == name)) { (sc["files"] as JsonObject ?? (JsonObject)(sc["files"] = new JsonObject()))[name] = value; fixes.Add($"{label}: params.{name} is a file slot: moved into files"); continue; }
+                    var near = Closest(name, block.Params.Select(p => p.Name));
+                    if (near is not null && ps[near] is null) { ps[near] = value; fixes.Add($"{label}: params.{name} is params.{near}"); }
+                    else fixes.Add($"{label}: params.{name}: {block.Id} has no such param ({string.Join(", ", block.Params.Select(p => p.Name))}): left out");
+                }
+            if (sc["params"] is JsonObject pz)
+                foreach (var (name, p) in block.Params)
+                    if (pz[name] is { } v) Coerce(pz, name, p.Type, fixes, $"{label}.params.{name}", p);
+            if (sc["files"] is JsonObject files)
+                foreach (var slotName in files.Select(kv => kv.Key).ToList())
+                {
+                    if (block.Files.Any(f => f.Name == slotName)) continue;
+                    var value = files[slotName];
+                    // the kind of what was given: a made still or a picture file is an image, a clip or a video file a video
+                    var kind = value is JsonObject mk ? (Str(mk["make"]) == "clip" ? "video" : "image")
+                             : Str(value) is { } r ? (StudioProject.VideoExt.Contains(Path.GetExtension(r).ToLowerInvariant()) ? "video" : "image") : "";
+                    var free = block.Files.Where(f => files[f.Name] is null).ToList();
+                    var target = free.Where(f => f.S.Kind == kind).Select(f => f.Name).ToList() is { Count: 1 } same ? same[0]
+                               : free.Count == 1 ? free[0].Name : Closest(slotName, free.Select(f => f.Name));
+                    files.Remove(slotName);
+                    if (target is not null) { files[target] = value?.DeepClone(); fixes.Add($"{label}: files.{slotName} is files.{target}"); }
+                    else fixes.Add($"{label}: files.{slotName}: {block.Id} has no such slot ({string.Join(", ", block.Files.Select(f => f.Name))}): left out");
+                }
+        }
+        return fixes;
+    }
+
+    // the format named the way people say it
+    private static string? FormatOf(string said) => Regex.Replace(said.ToLowerInvariant(), @"[\s_-]+", "") switch
+    {
+        "9:16" or "916" or "vertical" or "story" or "stories" or "tiktok" or "short" or "shorts" or "reels" or "phone" or "1080x1920" => "reel",
+        "1:1" or "11" or "squared" or "instagram" or "post" or "1080x1080" => "square",
+        "4:5" or "45" or "feed" or "facebook" or "1080x1350" => "portrait",
+        "16:9" or "169" or "horizontal" or "wide" or "widescreen" or "youtube" or "1920x1080" => "landscape",
+        _ => null,
+    };
+
+    /// <summary>A value written in the wrong JSON type, made the type the field takes when that is unambiguous.</summary>
+    private static void Coerce(JsonObject o, string key, string type, List<string> fixes, string label, VideoCatalog.Param? p = null)
+    {
+        var v = o[key];
+        if (v is null) return;
+        var s = Str(v)?.Trim();
+        switch (type)
+        {
+            case "number" when s is not null && double.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d):
+                o[key] = d; fixes.Add($"{label}: \"{s}\" is the number {N(d)}"); break;
+            case "bool" when s is "true" or "false" or "yes" or "no":
+                o[key] = s is "true" or "yes"; fixes.Add($"{label}: \"{s}\" is {(s is "true" or "yes" ? "true" : "false")}"); break;
+            case "list" when s is not null:
+                o[key] = new JsonArray(s); fixes.Add($"{label}: one text is a list of one"); break;
+            case "enum" when s is not null && p is not null && !p.Options.Contains(s) && Closest(s, p.Options) is { } opt:
+                o[key] = opt; fixes.Add($"{label}: \"{s}\" is \"{opt}\""); break;
+        }
+    }
+
+    /// <summary>The one name <paramref name="name"/> was meant to be: the same letters in another case, one containing the
+    /// other, or one or two letters off; null when none or several fit.</summary>
+    private static string? Closest(string name, IEnumerable<string> names)
+    {
+        var all = names.Where(n => !string.IsNullOrEmpty(n)).Distinct().ToList();
+        var lower = name.ToLowerInvariant().Replace("_", "-");
+        var exact = all.Where(n => n.ToLowerInvariant() == lower).ToList();
+        if (exact.Count == 1) return exact[0];
+        var near = all.Where(n => Distance(n.ToLowerInvariant(), lower) <= (lower.Length >= 6 ? 2 : 1)).ToList();
+        if (near.Count == 1) return near[0];
+        var contains = all.Where(n => lower.Length >= 3 && (n.ToLowerInvariant().Contains(lower) || lower.Contains(n.ToLowerInvariant()))).ToList();
+        return contains.Count == 1 ? contains[0] : null;
+    }
+
+    private static int Distance(string a, string b)
+    {
+        var d = new int[a.Length + 1, b.Length + 1];
+        for (int i = 0; i <= a.Length; i++) d[i, 0] = i;
+        for (int j = 0; j <= b.Length; j++) d[0, j] = j;
+        for (int i = 1; i <= a.Length; i++)
+            for (int j = 1; j <= b.Length; j++)
+                d[i, j] = Math.Min(Math.Min(d[i - 1, j] + 1, d[i, j - 1] + 1), d[i - 1, j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1));
+        return d[a.Length, b.Length];
+    }
 
     /// <summary>Checks the script against the catalog and returns every problem, each naming its scene and field
     /// (<c>scenes[2] (screen-demo).params.target: ...</c>). Every file reference is resolved now and rewritten to its

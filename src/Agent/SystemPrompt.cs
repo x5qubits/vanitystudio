@@ -151,10 +151,11 @@ public static class SystemPrompt
         "and button; a sub, kicker or note only when the request names one;\n" +
         "   - the last scene is the action (offer-poster or cta-close).\n" +
         "6. make_video action=submit script=<the script>. If it names errors, fix each one and submit again.\n" +
-        "7. Answer with the job number and one line per scene saying what it shows, and say the video renders in the background and is reported " +
-        "here when ready. If no block can show a moment the request names, say which moment and why. Then stop: do not wait for the video and do " +
-        "not check on it. When a job's result arrives (a message marked [Result of video job #N]), tell the operator where the video, the banner " +
-        "and the project are, one line per scene, every scene that fell back and every note.";
+        "7. Answer in two or three short lines of plain text: what the video is (format, length, the idea in a few words) and its job number, " +
+        "and that it renders in the background. No list of scenes, no file paths, no markdown headings: the console prints the scenes, the " +
+        "files and the edit link when the video is done. If no block can show a moment the request names, say which moment and why. Then stop: " +
+        "do not wait for the video and do not check on it. When a job's result arrives (a message marked [Result of video job #N]), the operator " +
+        "has already seen its files and its edit link: mention only what fell back or a note that matters, in a line or two, then do what they ask.";
 
     private const string Editing =
         "- A small change to a video you made (swap the music, swap one picture, rewrite one line, change the treatment, add or drop a scene, " +

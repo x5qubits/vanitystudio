@@ -222,7 +222,17 @@ public static class VideoText
         catch (JsonException) { return new JsonObject(); }
     }
     public static string? Str(JsonNode? n) => n is JsonValue v && v.GetValueKind() == JsonValueKind.String ? v.GetValue<string>() : null;
-    public static double? Num(JsonNode? n) => n is JsonValue v && v.GetValueKind() == JsonValueKind.Number ? v.GetValue<double>() : null;
+    /// <summary>A number, whether it was parsed from JSON or set in code (an int, a long, a double).</summary>
+    public static double? Num(JsonNode? n)
+    {
+        if (n is not JsonValue v || v.GetValueKind() != JsonValueKind.Number) return null;
+        if (v.TryGetValue<double>(out var d)) return d;
+        if (v.TryGetValue<int>(out var i)) return i;
+        if (v.TryGetValue<long>(out var l)) return l;
+        if (v.TryGetValue<decimal>(out var m)) return (double)m;
+        if (v.TryGetValue<float>(out var f)) return f;
+        return double.TryParse(v.ToJsonString(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x) ? x : null;
+    }
     public static bool? Bool(JsonNode? n) => n is JsonValue v ? v.GetValueKind() switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => null } : null;
     public static int? Int(JsonNode? n) => Num(n) is { } d ? (int)Math.Round(d) : null;
     public static string? Text(JsonNode? n) => n switch

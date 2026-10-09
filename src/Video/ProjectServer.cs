@@ -25,6 +25,8 @@ public sealed class ProjectServer : IDisposable
 
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _cts = new();
+    // the session's token: a project is served only to a link that carries it (like the engine's signed ?t=)
+    private readonly string _token = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(24)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
     private Func<long, string?> _projectOf;
     public int Port { get; }
 
@@ -50,14 +52,17 @@ public sealed class ProjectServer : IDisposable
         }
     }
 
-    public string EditLink(long job) => $"http://127.0.0.1:{Port}/edit/{job}";
-    public string ProjectUrl(long job) => $"http://127.0.0.1:{Port}/p/{job}.vstudio.json";
+    /// <summary>The short link: this server sends the browser on to <see cref="StudioLink"/>.</summary>
+    public string ShortLink(long job) => $"http://127.0.0.1:{Port}/edit/{job}";
+    public string ProjectUrl(long job) => $"http://127.0.0.1:{Port}/p/{job}.vstudio.json?t={_token}";
+    /// <summary>The edit link, in the engine's own form: the Studio with #/video/new?importUrl= the project's address.</summary>
     public string StudioLink(long job) => MakeVideoTool.StudioUrl() + "#/video/new?importUrl=" + Uri.EscapeDataString(ProjectUrl(job));
+    public string EditLink(long job) => StudioLink(job);
 
     /// <summary>Opens the job's project in the Studio in the default browser. Returns the link it opened.</summary>
     public string Open(long job)
     {
-        var link = EditLink(job);
+        var link = StudioLink(job);
         if (Environment.GetEnvironmentVariable("VANITY_STUDIO_NO_BROWSER") is "1" or "true") return link;   // scripts and tests
         try { Process.Start(new ProcessStartInfo(link) { UseShellExecute = true }); } catch { }
         return link;
@@ -87,7 +92,10 @@ public sealed class ProjectServer : IDisposable
                 var lines = head.Split("\r\n");
                 var first = lines[0].Split(' ');
                 var method = first.Length > 0 ? first[0] : "";
-                var target = first.Length > 1 ? first[1].Split('?')[0] : "";
+                var raw = first.Length > 1 ? first[1] : "";
+                var target = raw.Split('?')[0];
+                var query = raw.Contains('?') ? raw[(raw.IndexOf('?') + 1)..] : "";
+                var token = query.Split('&').Select(kv => kv.Split('=', 2)).Where(kv => kv[0] == "t" && kv.Length == 2).Select(kv => Uri.UnescapeDataString(kv[1])).FirstOrDefault();
                 var origin = lines.FirstOrDefault(l => l.StartsWith("Origin:", StringComparison.OrdinalIgnoreCase))?[7..].Trim();
                 var studio = new Uri(MakeVideoTool.StudioUrl()).GetLeftPart(UriPartial.Authority);
                 // only the Studio's pages may read a project from here
@@ -105,7 +113,7 @@ public sealed class ProjectServer : IDisposable
                     payload = Encoding.UTF8.GetBytes($"<!doctype html><meta charset=utf-8><title>Opening in Vanity Studio</title><a href=\"{WebUtility.HtmlEncode(to)}\">Open in Vanity Studio</a>");
                     reply = "HTTP/1.1 302 Found\r\n" + $"Location: {to}\r\n" + common + $"Content-Type: text/html; charset=utf-8\r\nContent-Length: {payload.Length}\r\n\r\n";
                 }
-                else if (method == "GET" && TryJob(target, "/p/", ".vstudio.json", out var job) && _projectOf(job) is { } file && File.Exists(file))
+                else if (method == "GET" && token == _token && TryJob(target, "/p/", ".vstudio.json", out var job) && _projectOf(job) is { } file && File.Exists(file))
                 {
                     payload = File.ReadAllBytes(file);
                     reply = "HTTP/1.1 200 OK\r\n" + cors + common + $"Content-Type: application/json\r\nContent-Length: {payload.Length}\r\n\r\n";

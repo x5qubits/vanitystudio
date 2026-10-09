@@ -380,7 +380,7 @@ public sealed class ConsoleHost
         _usage  = new UsageTracker(Path.Combine(project, "usage.json"));
         _memory = new JsonFileMemoryStore(Path.Combine(project, "memory.json"));
         // The smart memory: after every turn that used tools, a background model call records what the steps proved.
-        _autoSave = _o.NoMemory ? null : new MemoryAutoSave(_memory, SideCallAsync, line => Dim("  [" + line + "]"));
+        _autoSave = _o.NoMemory ? null : new MemoryAutoSave(_memory, SideCallAsync, line => { if (Log.Verbose) Dim("  [" + line + "]"); else Log.Info("[memory] " + line); });
 
         _library = PromptLibrary.Load(_workspace);
         _personaName ??= _o.Persona;
@@ -445,15 +445,21 @@ public sealed class ConsoleHost
         {
             OnStep = (iter, max) => { EndStream(); SpinStart(iter == 1 ? "waiting for " + (ActiveModel() ?? "the model") : $"waiting for {ActiveModel()} (step {iter})"); },
             OnModel = (_, _) => { SpinStop(); EndStream(); },
-            OnToolCall = (tool, preview) => Print(ConsoleColor.DarkYellow, $"{pad}→ {tool}{(preview.Length > 0 ? "  " + preview : "")}"),
-            OnToolResult = (tool, sec, chars, err) => Print(err ? ConsoleColor.Red : ConsoleColor.DarkGreen, $"{pad}{(err ? "✗" : "←")} {tool}  ({sec.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s · {chars.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)} chars)"),
-            // why it was refused, so a ✗ is never a mystery (the model reads the whole text and fixes it)
+            // one quiet line per step; a step that worked says nothing more (-v shows its size and time)
+            OnToolCall = (tool, preview) => Print(ConsoleColor.DarkGray, $"{pad}· {StepText(tool, preview)}"),
+            OnToolResult = (tool, sec, chars, err) =>
+            {
+                if (!err && Log.Verbose) Dim($"{pad}  ← {tool} {sec.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s, {chars:N0} chars");
+            },
+            // a refused step: one line with the first reason (the model reads the whole text and fixes it)
             OnToolError = (tool, text) =>
             {
-                var lines = (text ?? "").Replace("\r", "").Split('\n').Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
+                var lines = (text ?? "").Replace("\r", "").Split('\n').Select(l => l.Trim().TrimStart('-').Trim()).Where(l => l.Length > 0).ToList();
                 if (lines.Count > 0 && lines[0].StartsWith("Error:", StringComparison.Ordinal)) lines[0] = lines[0][6..].Trim();
-                foreach (var l in lines.Take(6)) Print(ConsoleColor.DarkRed, $"{pad}    {(l.Length > 170 ? l[..167] + "..." : l)}");
-                if (lines.Count > 6) Print(ConsoleColor.DarkRed, $"{pad}    ... ({lines.Count - 6} more line(s))");
+                // "The script was not queued: 2 problem(s)..." is the header; the problems are what matter
+                var reasons = lines.Count > 1 && lines[0].Contains("not queued") ? lines.Skip(1).TakeWhile(l => !l.StartsWith("Fixed in")).ToList() : lines.Take(1).ToList();
+                foreach (var l in reasons.Take(3)) Print(ConsoleColor.DarkYellow, $"{pad}  ✗ {Clip(l, 150)}");
+                if (reasons.Count > 3) Print(ConsoleColor.DarkYellow, $"{pad}    and {reasons.Count - 3} more");
             },
             // Reasoning that already streamed live is not printed a second time when the call returns.
             OnThought = text => { if (_streamedThought > 0) return; lock (ConsoleGate) { Console.ForegroundColor = ConsoleColor.DarkGray; foreach (var line in Wrap(text.Trim(), 110)) Console.WriteLine(pad + line); Console.ResetColor(); } },
@@ -462,27 +468,152 @@ public sealed class ConsoleHost
 
     // ── the video jobs' progress, printed as it happens ──────────────────────────────────────────────────────────
 
+    // what a job already said, so a stage is announced once ("rendering…", not every 10 %)
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<long, string> _jobSaid = new();
+
     private void JobEvent(VideoJob job, string line)
     {
-        var final = line.StartsWith("✓") || line.StartsWith("✗");
-        var color = line.StartsWith("✓") ? ConsoleColor.Green : line.StartsWith("✗") ? ConsoleColor.Red : ConsoleColor.Magenta;
-        if (final)
+        if (line.StartsWith("✓") || line.StartsWith("✗")) { PrintFinished(job); return; }
+        if (Log.Verbose) { Print(ConsoleColor.DarkMagenta, $"  #{job.Id} {line}"); return; }
+        // the progress worth a line: rendering started, the site being captured, a made picture or voice that failed,
+        // a provider that is busy or out of quota
+        string? say = null;
+        var stage = System.Text.RegularExpressions.Regex.Match(line, @"^(capture|compile|check|render|sheet|collect|fonts|running|waiting)\b").Groups[1].Value;
+        if (stage is "render" or "compile" or "check" or "fonts" or "running") say = "rendering…";
+        else if (stage == "capture") say = "capturing the site's screens…";
+        else if (stage == "waiting") say = "waiting for the renderer…";
+        else if (line.StartsWith("making a still")) say = "making AI pictures…";
+        else if (line.StartsWith("making a clip")) say = "making AI clips…";
+        else if (line.StartsWith("voice ") && line.Contains("spoken")) say = "recording the voice-over…";
+        else if (line.Contains("could not") || line.Contains("used up") || line.Contains("went wrong") || line.Contains("failed"))
+        { Print(ConsoleColor.DarkYellow, $"  #{job.Id} {Clip(line, 140)}"); return; }
+        if (say is null || (_jobSaid.TryGetValue(job.Id, out var had) && had == say)) return;
+        _jobSaid[job.Id] = say;
+        Print(ConsoleColor.Magenta, $"  #{job.Id} {say}");
+    }
+
+    /// <summary>A finished job, short: title and length, the folder, one line per scene, what fell back, and the link
+    /// that opens it in the Studio's editor (the long report with every path goes to the conversation, not the screen).</summary>
+    private void PrintFinished(VideoJob job)
+    {
+        _jobSaid.TryRemove(job.Id, out _);
+        Print(ConsoleColor.Gray, "");
+        if (job.Status != VideoJob.Done)
         {
-            Print(color, "");
-            foreach (var l in line.Split('\n')) Print(color, "  " + l);
-            if (job.Status == VideoJob.Done)
+            Print(ConsoleColor.Red, $"  ✗ {job.Title} · job #{job.Id} was not made");
+            Print(ConsoleColor.DarkYellow, $"    {Clip(VideoText.ErrorText(job.Error ?? "it stopped without a reason"), 300)}");
+            return;
+        }
+        var script = VideoText.ParseObject(job.ScriptJson);
+        var report = VideoText.ParseObject(job.ReportJson ?? "{}");
+        var format = VideoText.Str(script["format"]) ?? (job.Kind == "doc" ? "project" : "reel");
+        var secs = (VideoText.Num(report["duration"]) ?? job.Duration).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        Print(ConsoleColor.Green, $"  ✓ {job.Title} · {secs} s · {format} · job #{job.Id}");
+        var folder = job.OutDir is null ? "" : job.OutDir.Replace('/', Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        Print(ConsoleColor.Gray, $"    {folder,-52} /open {job.Id} · /folder {job.Id}");
+        var scenes = (report["scenes"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
+        var written = (script["scenes"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
+        for (int i = 0; i < Math.Max(scenes.Count, written.Count); i++)
+        {
+            var r = i < scenes.Count ? scenes[i] : null; var w = i < written.Count ? written[i] : null;
+            var block = VideoText.Str(r?["block"]) ?? VideoText.Str(w?["block"]) ?? "";
+            var line = (VideoText.Str(r?["line"]) ?? VideoText.Str(w?["line"]) ?? "").Replace("*", "");
+            Dim($"    {i + 1} {block,-16} {Clip(line, 90)}");
+        }
+        // what did not come out as written: a scene that fell back, a picture that could not be made
+        var notes = (report["notes"] as JsonArray ?? []).Concat(VideoText.ParseObject(job.AssetsJson)["notes"] as JsonArray ?? [])
+            .Select(VideoText.Text).Where(t => t is { Length: > 0 }).Select(t => VideoText.ErrorText(t!)).Distinct().ToList();
+        foreach (var n in notes.Take(3)) Print(ConsoleColor.DarkYellow, $"    ! {Clip(n, 150)}");
+        if (notes.Count > 3) Print(ConsoleColor.DarkYellow, $"    ! and {notes.Count - 3} more (/job {job.Id})");
+        if (job.Project is not null)
+        {
+            Print(ConsoleColor.Cyan, "    Edit in Vanity Studio (Ctrl+click or copy):");
+            Print(ConsoleColor.Cyan, $"    {EditServer().EditLink(job.Id)}");
+            // a command that exits takes the link server with it
+            if (_exitsAfterRender) Dim($"    (the link needs Vanity Studio running: vanity-studio edit {job.Id} serves it and opens it)");
+        }
+    }
+
+    private bool _exitsAfterRender;
+
+    private static string Kilo(long n) => n >= 1000 ? (n / 1000.0).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "k" : n.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>The model's answer as the console shows it: its markdown read, not printed (headings and **bold** in
+    /// white, `code` in cyan, bullets as •), wrapped to the window, under "Vanity:".</summary>
+    private void PrintReply(string reply)
+    {
+        lock (ConsoleGate)
+        {
+            Console.WriteLine();
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("Vanity:");
+            Console.ResetColor();
+            var width = Console.IsOutputRedirected ? 110 : Math.Max(60, Math.Min(120, Console.WindowWidth - 4));
+            foreach (var raw in (reply ?? "").Replace("\r", "").Trim().Split('\n'))
             {
-                // the last thing on screen: where to edit it by hand, with the file to import
-                if (job.Project is not null)
+                var line = raw.TrimEnd();
+                if (line.Trim().Length == 0) { Console.WriteLine(); continue; }
+                var heading = System.Text.RegularExpressions.Regex.Match(line, @"^\s*#{1,6}\s+(.*)$");
+                if (heading.Success) { Console.ForegroundColor = ConsoleColor.White; Console.WriteLine("  " + heading.Groups[1].Value.Replace("**", "")); Console.ResetColor(); continue; }
+                var indent = "  ";
+                var bullet = System.Text.RegularExpressions.Regex.Match(line, @"^(\s*)[-*+]\s+(.*)$");
+                if (bullet.Success) { indent = "  " + bullet.Groups[1].Value + "• "; line = bullet.Groups[2].Value; }
+                var first = true;
+                foreach (var part in Wrap(line, width - indent.Length))
                 {
-                    Print(ConsoleColor.Cyan, $"  Edit it in Vanity Studio (Ctrl+click or copy): {EditServer().EditLink(job.Id)}");
-                    Dim($"    the link works while Vanity Studio is open; any time: {MakeVideoTool.StudioUrl()}#/home → Import video project →");
-                    Dim($"    {Path.GetFullPath(Path.Combine(_workspace, job.Project))}");
+                    Console.Write(first ? indent : new string(' ', indent.Length));
+                    WriteInline(part);
+                    Console.WriteLine();
+                    first = false;
                 }
-                Dim($"  /open {job.Id} plays it · /folder {job.Id} shows the files · /edit {job.Id} opens it in the Studio in one step");
             }
         }
-        else Print(color, $"  [video #{job.Id}] {line}");
+    }
+
+    // **bold** in white, `code` in cyan, the rest in the normal colour; the markers themselves are not printed
+    private static void WriteInline(string text)
+    {
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(text, @"\*\*(.+?)\*\*|`([^`]+)`|\*(?!\s)([^*]+?)\*|([^*`]+|[*`])"))
+        {
+            if (m.Groups[1].Success) { Console.ForegroundColor = ConsoleColor.White; Console.Write(m.Groups[1].Value); }
+            else if (m.Groups[2].Success) { Console.ForegroundColor = ConsoleColor.Cyan; Console.Write(m.Groups[2].Value); }
+            else if (m.Groups[3].Success) { Console.ForegroundColor = ConsoleColor.White; Console.Write(m.Groups[3].Value); }
+            else { Console.ResetColor(); Console.Write(m.Groups[4].Value); }
+            Console.ResetColor();
+        }
+    }
+
+    private static string Clip(string s, int max)
+    {
+        s = (s ?? "").Replace("\r", " ").Replace("\n", " ").Trim();
+        return s.Length <= max ? s : s[..(max - 1)] + "…";
+    }
+
+    /// <summary>A step as the operator reads it: what the tool does with what, not its arguments.</summary>
+    private static string StepText(string tool, string preview)
+    {
+        preview = Clip(preview, 90);
+        return tool switch
+        {
+            "web" => preview.StartsWith("http") ? "reading " + preview : preview.Contains("download") ? "downloading pictures" : "web " + preview,
+            "make_video" => preview switch
+            {
+                "blocks" => "reading the Studio's scenes",
+                "submit" => "sending the script",
+                "status" => "checking the jobs",
+                "remix" => "remixing",
+                "look" => "looking at a picture",
+                _ when preview.StartsWith("http") => "walking " + preview,
+                _ => "make_video " + preview,
+            },
+            "edit_video" => "editing the project" + (preview.Length > 0 ? ": " + preview : ""),
+            "brand" => preview == "read" ? "reading the brand" : "saving the brand",
+            "files" => "looking for files" + (preview.Length > 0 && preview != "list" ? ": " + preview : ""),
+            "read_file" => "reading " + Path.GetFileName(preview.TrimEnd('…')),
+            "memory" => "memory" + (preview.Length > 0 ? ": " + preview : ""),
+            "skill_view" => "reading a playbook",
+            _ => tool + (preview.Length > 0 ? " " + preview : ""),
+        };
     }
 
     /// <summary>One line from any thread: the spinner's line is cleared first, and the prompt is written again when the
@@ -637,6 +768,7 @@ public sealed class ConsoleHost
     /// rendered here and waited for; the files land in videos/ (or --out).</summary>
     private async Task<int> RenderFileAsync()
     {
+        _exitsAfterRender = true;
         var file = Path.GetFullPath(_o.CommandArgs[0]);
         if (!File.Exists(file)) { Red("  no such file: " + file); return 2; }
         OpenProject();
@@ -648,10 +780,12 @@ public sealed class ConsoleHost
         catch (JsonException ex) { Red("  " + MakeVideoTool.ScriptError(text, ex)); return 2; }
         if (node is null) { Red("  the file is not one JSON object"); return 2; }
         List<long> ids;
-        if (node["script"] is not null && node["scenes"] is JsonArray)
+        // a script is scenes made of blocks (with or without its "script": 1); anything else is a Studio project doc
+        if (node["script"] is not null || (node["scenes"] is JsonArray ss && ss.OfType<JsonObject>().Any(s => s["block"] is not null)))
         {
             var tool = new MakeVideoTool(_project, _jobs!, () => _opts, () => "");
-            var (queued, problem) = await tool.QueueScriptAsync(text, "", cts.Token);
+            var (queued, problem, fixes) = await tool.QueueScriptAsync(text, "", cts.Token);
+            foreach (var f in fixes) Dim("  fixed: " + f);
             if (problem is not null) { Red("  " + problem); return 1; }
             ids = queued;
         }
@@ -850,16 +984,9 @@ public sealed class ConsoleHost
             _autoSave?.Handle(message, reply, _loop.LastSteps.ToList(), _workspace);
             if (printReply)
             {
-                lock (ConsoleGate)
-                {
-                    Console.WriteLine();
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.Write("Vanity: ");
-                    Console.ResetColor();
-                    Console.WriteLine(reply.Trim());
-                }
+                PrintReply(reply);
                 var (pt, ctok, cached) = _loop.LastTokenUsage;
-                Dim($"  [{_loop.LastModel} · {clock.Elapsed.TotalSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s · tokens: {pt:N0} in / {ctok:N0} out / {cached:N0} cached]");
+                Dim($"  {_loop.LastModel} · {clock.Elapsed.TotalSeconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)} s · {Kilo(pt)} in · {Kilo(ctok)} out");
                 Console.WriteLine();
             }
             return reply;
