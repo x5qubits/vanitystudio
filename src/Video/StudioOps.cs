@@ -649,6 +649,12 @@ namespace VanityStudio.Video
                 var mapped = MapJobMedia(script.DeepClone(), mediaBase, mediaDir, missing);
                 if (missing.Count > 0) return Outcome.Fail("media not in the job: " + string.Join(", ", missing.Distinct()) + " (put them first)");
                 var pageJob = isDoc ? new JsonObject { ["op"] = "render", ["doc"] = mapped, ["name"] = job.Name } : new JsonObject { ["script"] = mapped, ["name"] = job.Name };
+                // the film grain the script asked for is the page's to apply, not a script field the Studio knows
+                if (!isDoc && mapped is JsonObject ms && ms["grain"] is JsonValue gv && gv.TryGetValue<string>(out var grain))
+                {
+                    ms.Remove("grain");
+                    pageJob["grain"] = grain;
+                }
 
                 var (cdp, _) = await browser.OpenPageAsync(ct).ConfigureAwait(false);
                 using (cdp)
@@ -1648,11 +1654,13 @@ namespace VanityStudio.Video
             }
         }
 
-        // The job page, served on the Studio's own origin. A script job: the Studio's director does all of it (compile,
-        // checks, render, sheet, report) and sets window.__progress / __stage / __result / __blobUrl / __done itself. A
-        // doc job (a Studio project edited by hand) and a probe (docs, spec, validate, frame, sheet): the Studio's own
-        // video API (js/api/videoApi.js) does it, the way the Studio's tools/headless.html drives it. The page only
-        // catches what could not be reported (a Studio without the module, a crash while loading it).
+        // The job page, served on the Studio's own origin. A script job: the Studio's director compiles it, checks it and
+        // renders it, and sets window.__progress / __stage / __result / __blobUrl / __done itself. A script with a "grain"
+        // other than the look's own ("none" or "subtle"): the director compiles and checks only (its own sheetOnly mode),
+        // the grain of the compiled doc is turned down, and the doc is rendered with the Studio's video API. A doc job (a
+        // Studio project edited by hand) and a probe (docs, spec, validate, frame, sheet): the Studio's video API
+        // (js/api/videoApi.js) does it, the way the Studio's tools/headless.html drives it. The page only catches what
+        // could not be reported (a Studio without the module, a crash while loading it).
         private static string JobHtml(string studio) => $$"""
 <!doctype html>
 <html><head><meta charset="utf-8"><base href="{{WebUtility.HtmlEncode(studio)}}"><title>Vanity video job</title></head>
@@ -1667,10 +1675,56 @@ window.__blobs = new Map();
 URL.createObjectURL = (o) => { const u = makeUrl(o); try { if (o instanceof Blob && /^video\//.test(o.type || "")) window.__blobs.set(u, o); } catch (e) { } return u; };
 const finish = (r) => { window.__result = r; window.__progress = 1; window.__done = true; };
 const stage = (s, p) => { window.__stage = s; if (p != null) window.__progress = p; };
+const said = (e) => String(e && e.message || e);
+
+// a doc rendered with the Studio's video API: the MP4, the contact sheet (the middle of every scene when the report
+// has them), the banner (the last poster scene at rest, else the last frame), and the result as the director gives it
+async function renderDoc(api, doc, report, warnings0) {
+  const v = api.validate(doc);
+  if (!v.ok) return finish({ ok: false, errors: v.errors, warnings: v.warnings, report, doc });
+  stage("compile", 0.03);
+  const built = await api.build(doc);
+  const duration = await api.durationOf(built.tl);
+  stage("render", 0.08);
+  const r = await api.render(built.tl, { onProgress: (p) => { window.__progress = 0.08 + 0.88 * Math.max(0, Math.min(1, p)); } });
+  stage("sheet", 0.97);
+  const warnings = [...(warnings0 || []), ...v.warnings];
+  const scenes = (report && report.scenes) || [];
+  let sheet = null, poster = false;
+  try {
+    sheet = scenes.length
+      ? (await api.sheet(built.tl, { times: scenes.map((s) => +(s.start + Math.min(s.dur - 0.05, Math.max(0.6, s.dur * 0.6))).toFixed(2)), cols: Math.min(4, scenes.length), scale: 0.25 })).dataUrl
+      : (await api.sheet(built.tl, { frames: 8, cols: 4, scale: 0.25 })).dataUrl;
+  } catch (e) { warnings.push("the contact sheet could not be drawn: " + said(e)); }
+  const posterScene = [...scenes].reverse().find((s) => s.banner);
+  const bannerAt = posterScene ? posterScene.start + Math.max(posterScene.dur * 0.7, posterScene.dur - 0.9) : Math.max(0, duration - 0.06);
+  if (report) report.banner = { at: +bannerAt.toFixed(2), scene: posterScene ? scenes.indexOf(posterScene) + 1 : null };
+  try { window.__poster = (await api.frame(built.tl, bannerAt, { scale: 1, type: "image/png" })).dataUrl; poster = true; }
+  catch (e) { warnings.push("the last frame could not be drawn: " + said(e)); }
+  window.__blobUrl = r.url;
+  finish({ ok: true, errors: [], warnings, duration, bytes: r.blob.size, ext: r.ext, sheet, poster, doc, report: report || { scenes: [], notes: [], checks: [] } });
+}
+
 try {
-  if (job.script) {
+  if (job.script && (job.grain == null || job.grain === "film")) {
     const { runJob } = await import("./js/video/director.js");
     await runJob(job);
+  } else if (job.script) {
+    const { runJob } = await import("./js/video/director.js");
+    const { installVideoApi } = await import("./js/api/videoApi.js");
+    // compile and check only: the director leaves the compiled doc and its report (and sets __done, taken back here at
+    // once: the runner cannot look between this and the next line)
+    const pre = await runJob({ ...job, sheetOnly: true, times: [0], cols: 1, scale: 0.05 });
+    window.__done = false; window.__result = null;
+    if (!pre || !pre.ok || !pre.doc) finish(pre || { ok: false, errors: ["the script did not compile"] });
+    else {
+      // the grain the look laid over every picture scene, turned down (subtle) or taken out (none)
+      const k = job.grain === "subtle" ? 0.35 : 0;
+      for (const s of pre.doc.scenes || pre.doc.clips || [])
+        if (Array.isArray(s.effects))
+          s.effects = s.effects.map((e) => e && e.type === "noise" ? (k > 0 ? { ...e, amount: +(Number(e.amount || 0) * k).toFixed(4) } : null) : e).filter(Boolean);
+      await renderDoc(installVideoApi(), pre.doc, pre.report, pre.warnings);
+    }
   } else {
     const { installVideoApi } = await import("./js/api/videoApi.js");
     const api = installVideoApi();
@@ -1678,6 +1732,7 @@ try {
     window.__progress = 0;
     if (op === "docs") finish({ ok: true, docs: api.docs() });
     else if (op === "spec") finish({ ok: true, spec: api.spec() });
+    else if (op === "render") await renderDoc(api, job.doc, null, []);
     else {
       const v = api.validate(job.doc);
       if (op === "validate" || !v.ok) finish({ ok: v.ok, errors: v.errors, warnings: v.warnings });
@@ -1688,26 +1743,16 @@ try {
         if (op === "frame") {
           const f = await api.frame(built.tl, Math.max(0, Math.min(job.t || 0, duration)), { scale: job.scale || 1, type: "image/png" });
           finish({ ok: true, duration, dataUrl: f.dataUrl, width: f.width, height: f.height, warnings: v.warnings });
-        } else if (op === "sheet") {
+        } else {
           const sh = await api.sheet(built.tl, { frames: job.frames || 8, cols: job.cols || 4, scale: job.scale || 0.25, times: job.times || null });
           finish({ ok: true, duration, dataUrl: sh.dataUrl, times: sh.times, warnings: v.warnings });
-        } else {
-          stage("render", 0.08);
-          const r = await api.render(built.tl, { onProgress: (p) => { window.__progress = 0.08 + 0.88 * Math.max(0, Math.min(1, p)); } });
-          stage("sheet", 0.97);
-          const warnings = [...v.warnings];
-          let sheet = null, poster = false;
-          try { sheet = (await api.sheet(built.tl, { frames: 8, cols: 4, scale: 0.25 })).dataUrl; } catch (e) { warnings.push("the contact sheet could not be drawn: " + (e && e.message || e)); }
-          try { window.__poster = (await api.frame(built.tl, Math.max(0, duration - 0.06), { scale: 1, type: "image/png" })).dataUrl; poster = true; } catch (e) { warnings.push("the last frame could not be drawn: " + (e && e.message || e)); }
-          window.__blobUrl = r.url;
-          finish({ ok: true, errors: [], warnings, duration, bytes: r.blob.size, ext: r.ext, sheet, poster, doc: job.doc, report: { scenes: [], notes: [], checks: [] } });
         }
       }
     }
   }
 } catch (e) {
   out.textContent += "ERROR " + (e && e.stack || e) + "\n";
-  if (!window.__done) finish({ ok: false, errors: [String(e && e.message || e)] });
+  if (!window.__done) finish({ ok: false, errors: [said(e)] });
 }
 </script></body></html>
 """;

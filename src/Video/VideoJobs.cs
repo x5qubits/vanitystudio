@@ -782,6 +782,8 @@ public sealed class VideoJobs : IDisposable
         }
         script.Remove("takes");
         script.Remove("remix_of");
+        // clean pictures unless the script asks for the look's film grain (the renderer's job page applies it)
+        if (script["grain"] is null) script["grain"] = "none";
         if (notes.Count > 0) script["notes"] = new JsonArray(notes.Select(n => (JsonNode?)JsonValue.Create(n)).ToArray());
         return (script, files, notes);
     }
@@ -940,12 +942,13 @@ public sealed class VideoJobs : IDisposable
         var checks = (report["checks"] as JsonArray ?? new JsonArray()).Concat(report["warnings"] as JsonArray ?? new JsonArray())
             .Select(Text).Where(x => x is { Length: > 0 }).Distinct().Take(8).ToList();
         if (checks.Count > 0) sb.Append("Checks:\n- " + string.Join("\n- ", checks) + "\n");
-        // how to change it by hand: the Studio's own editor, from the project file on this computer
-        if (job.Project is not null)
-            sb.Append($"Edit it in Vanity Studio: open {MakeVideoTool.StudioUrl()}#/home, click \"Import video project\" and choose the project file above " +
-                      $"(or /edit {job.Id} opens it there in one step). To change it by asking: edit_video open source={job.Id}.\n");
         var facts = sb.ToString().TrimEnd();
-        return (head + facts, $"✓ The video \"{job.Title}\" is ready (job #{job.Id}).\n" + facts);
+        // how to change it by hand: the Studio's own editor, from the project file on this computer (the console prints
+        // this as the last lines of the report; the conversation gets it here)
+        var edit = job.Project is null ? "" :
+            $"\nEdit it in Vanity Studio: open {MakeVideoTool.StudioUrl()}#/home, click \"Import video project\" and choose the project file above " +
+            $"(or /edit {job.Id} opens it there in one step). To change it by asking: edit_video open source={job.Id}.";
+        return (head + facts + edit, $"✓ The video \"{job.Title}\" is ready (job #{job.Id}).\n" + facts);
     }
 
     /// <summary>One line per job for /jobs and make_video status.</summary>

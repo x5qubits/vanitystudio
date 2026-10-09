@@ -466,7 +466,16 @@ public sealed class ConsoleHost
         {
             Print(color, "");
             foreach (var l in line.Split('\n')) Print(color, "  " + l);
-            if (job.Status == VideoJob.Done) Dim($"  /open {job.Id} plays it · /folder {job.Id} shows the files · /edit {job.Id} opens it in the Studio");
+            if (job.Status == VideoJob.Done)
+            {
+                // the last thing on screen: where to edit it by hand, with the file to import
+                if (job.Project is not null)
+                {
+                    Print(ConsoleColor.Cyan, $"  Edit it in Vanity Studio: {MakeVideoTool.StudioUrl()}#/home  →  Import video project  →");
+                    Print(ConsoleColor.Cyan, $"    {Path.GetFullPath(Path.Combine(_workspace, job.Project))}");
+                }
+                Dim($"  /open {job.Id} plays it · /folder {job.Id} shows the files · /edit {job.Id} opens it in the Studio in one step");
+            }
         }
         else Print(color, $"  [video #{job.Id}] {line}");
     }

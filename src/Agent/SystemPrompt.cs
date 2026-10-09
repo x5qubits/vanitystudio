@@ -130,7 +130,11 @@ public static class SystemPrompt
         "so every video reads as the same world. After the first video of a brand, memory save title \"video_signature:<brand>\" with the " +
         "treatment+look chosen.\n" +
         "   - a scene may name its own \"look\": <look id> for an act (bold hook, calm middle, cinematic close); at most two look changes.\n" +
-        "   - \"takes\": 2 or 3 when the operator will A/B test an ad (each take seeds differently); 1 otherwise.\n" +
+        "   - \"takes\": 1, one video, unless the operator asks for versions, variants, takes or an A/B test: then 2 or 3 (each take seeds " +
+        "differently). An ad is not a request for several videos.\n" +
+        "   - pictures: every full-frame picture at least as large as the frame (submit refuses one blown up more than 1.6x): a small " +
+        "screenshot or logo goes where it is shown as a card (offer-poster's picture, device-mockup), a page is shown live with screen-demo. " +
+        "\"grain\" stays out (none, clean pictures) unless the film is cinematic or retro and made of real photographs.\n" +
         "   - files: the operator's own first (a path in the project, or a full path such as C:/Users/.../Desktop/shop.jpg); for what is " +
         "missing, {\"make\":\"still\",\"prompt\":...} for a picture, {\"make\":\"clip\",\"from\":<picture>,\"prompt\":...} ONLY for body motion. " +
         "Travel/grow/transform is picture-transform. A website's step is screen-demo with the url, clicks and target site gave.\n" +

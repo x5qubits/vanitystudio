@@ -452,7 +452,11 @@ public sealed class MakeVideoTool : IVisualTool
             else { while (arr.Count <= last.Idx!.Value) arr.Add(null); arr[last.Idx.Value] = value; }
         }
     }
-    private static readonly string[] ScriptKeys = { "script", "title", "format", "language", "voice", "look", "treatment", "seed", "takes", "speed", "textSoftness", "quality", "music", "brand", "scenes", "remix_of" };
+    private static readonly string[] ScriptKeys = { "script", "title", "format", "language", "voice", "look", "treatment", "seed", "takes", "speed", "textSoftness", "quality", "grain", "music", "brand", "scenes", "remix_of" };
+    // full-frame picture blocks: a picture blown up more than this to cover the frame comes out soft (and the look's
+    // grain turns it to noise): a 1200x630 screenshot in a square picture-hero, 2026-10-09
+    private static readonly string[] FullFrameBlocks = { "picture-hero", "picture-transform", "picture-poster" };
+    private const double MaxUpscale = 1.6;
     private static readonly string[] SceneKeys = { "block", "line", "params", "files", "look", "sfxDrop", "sfxAdd", "textIn", "textSoftness" };
     private static readonly string[] Treatments = { "bold", "calm", "editorial", "kinetic", "cinematic", "retro" };
     private static readonly string[] BrandKeys = { "name", "logo", "url", "colors" };
@@ -488,6 +492,8 @@ public sealed class MakeVideoTool : IVisualTool
             errors.Add("speed: a number between 0.4 and 2.5 (1 is normal; >1 compresses holds so the film reads faster; <1 lets it breathe; voice is NOT re-synthesised).");
         if (script["textSoftness"] is { } ts && (Num(ts) is not { } tsN || tsN < 0 || tsN > 3))
             errors.Add("textSoftness: 0..3 (0 razor-sharp text, 1 default, 2 softer film look, 3 cinematic blur). Set once at script level or per scene (scenes[i].textSoftness).");
+        if (script["grain"] is { } gr && (Str(gr) is not { } grS || !new[] { "none", "subtle", "film" }.Contains(grS)))
+            errors.Add("grain: none | subtle | film. The film grain the look lays over picture scenes: none (clean, the default), subtle (a third of it), film (the look's own; for a cinematic or retro film of real photographs).");
         if (script["quality"] is { } qty && (Str(qty) is not { } qtyS || !new[] { "low", "medium", "high", "ultra" }.Contains(qtyS)))
             errors.Add("quality: low | medium | high | ultra. Low ~6 Mbps (file-size sensitive), medium ~11 Mbps (default), high ~19 Mbps (archive), ultra ~28 Mbps (zero visible compression).");
         if (script["music"] is { } mu && (Str(mu) is not { } music || (music is not ("auto" or "none") && !cat.Moods.Contains(music) && !cat.Music.Contains(music))))
@@ -611,6 +617,15 @@ public sealed class MakeVideoTool : IVisualTool
                         var (f, err) = project.Resolve(reference);
                         if (f is null) { errors.Add($"{at}: {err}"); continue; }
                         if (slot.Kind == "image" && !IsImage(f)) { errors.Add($"{at}: {f.Name} is not a picture; this slot takes a picture."); continue; }
+                        // a full-frame picture must be big enough to cover the frame without being blown up
+                        if (slot.Kind == "image" && FullFrameBlocks.Contains(block.Id) && ImageSize(f.Path) is var (iw, ih) && iw > 0 && ih > 0)
+                        {
+                            var (fw, fh) = FormatSize(Str(script["format"]));
+                            var up = Math.Max((double)fw / iw, (double)fh / ih);
+                            if (up > MaxUpscale)
+                                errors.Add($"{at}: {f.Name} is {iw}x{ih}, and {block.Id} fills the {fw}x{fh} frame with it, so it would be blown up {up.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}x and look soft. " +
+                                           "Use a larger picture, put this one where it is shown as a card (offer-poster's picture, a device-mockup screen), or show the site live with screen-demo.");
+                        }
                         if (slot.Kind == "video" && !IsVideo(f)) { errors.Add($"{at}: {f.Name} is not a video clip; this slot takes a clip (a file, or {{\"make\": \"clip\", \"from\": <picture>, \"prompt\": ...}})."); continue; }
                         files[slotName] = f.Canonical;
                     }
@@ -860,6 +875,7 @@ public sealed class MakeVideoTool : IVisualTool
         sb.Append("speed (optional, 0.4..2.5): 1 is normal; >1 shortens silent holds and makes the film read faster; <1 lets it breathe. Voice lines keep their recorded length - speed only compresses the gaps.\n");
         sb.Append("textSoftness (optional, 0..3; default 1): dials the automatic drop-shadow under big text. 0 = razor sharp; 1 = default; 2 = softer film look; 3 = cinematic blur. Also settable per scene (scenes[i].textSoftness).\n");
         sb.Append("quality (optional, low | medium | high | ultra; default medium): H.264 bitrate tier for the exported MP4. low ~6 Mbps (small file), medium ~11 Mbps (default), high ~19 Mbps, ultra ~28 Mbps (no visible compression on fast motion / highlight bands).\n");
+        sb.Append("grain (optional, none | subtle | film; default none): the film grain the look lays over picture scenes. none keeps pictures, screenshots and product shots clean; subtle is a third of it; film is the look's own, only for a cinematic or retro film of real photographs.\n");
         sb.Append("a scene may name its own look (scenes[i].look = <look id>) for a multi-act film: a bold open, a calm middle, a cinematic close.\n");
         sb.Append("a scene may drop block-added SFX (scenes[i].sfxDrop = [\"whoosh\",\"ding\"]), add extra SFX anchored to a word or a time (scenes[i].sfxAdd = [{\"sfx\":\"ding\",\"at\":\"word:Websisco\",\"volume\":0.6}]; `at` is a number of seconds within the scene, or \"word:<text>\" / \"line:<text>\" / \"scene-end\"), and/or override the text-in on all its text layers (scenes[i].textIn = {\"type\":\"fade\"|\"rise\"|\"drop\"|\"pop\"|\"blur\"|\"slide\"|\"slideRight\"|\"typewriter\"|\"scramble\", \"dur\": 0.6, \"stagger\": 0.05, \"by\": \"char\"|\"word\"|\"line\"}).\n");
         sb.Append("\nremix (action=remix job=<id> patches=[{path, value}, ...]): change ONE or a FEW fields of an already-rendered job and render again. Scenes whose line and files did NOT change reuse their voice and AI pictures (0 AI calls). Common patches:\n" +
