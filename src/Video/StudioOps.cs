@@ -679,6 +679,7 @@ namespace VanityStudio.Video
                     await cdp.SendAsync("Runtime.enable", null, ct).ConfigureAwait(false);
                     await cdp.SendAsync("Page.enable", null, ct).ConfigureAwait(false);
                     try { await cdp.SendAsync("Inspector.enable", null, ct).ConfigureAwait(false); } catch (InvalidOperationException) { }   // only for the crash event
+                    await BypassServiceWorkerAsync(cdp, ct).ConfigureAwait(false);
                     await cdp.SendAsync("Fetch.enable", new { patterns = new[] { new { urlPattern = "*__vanity_*", requestStage = "Request" } } }, ct).ConfigureAwait(false);
                     await cdp.SendAsync("Page.addScriptToEvaluateOnNewDocument", new { source = "window.__job = " + pageJob.ToJsonString() + ";" }, ct).ConfigureAwait(false);
                     log($"[studio] video job {job.Id}: the director runs on {studio}");
@@ -686,10 +687,21 @@ namespace VanityStudio.Video
 
                     // the director says how far it is; job.json follows it (written only when it moves)
                     int lastTenth = -1;
+                    var opened = Stopwatch.StartNew();
+                    var pageChecked = false;
                     while (true)
                     {
                         await Task.Delay(1000, ct).ConfigureAwait(false);
                         if (crashed) return Outcome.Fail(WithLog("the Studio page crashed while it worked (often out of memory)", pageLog));
+                        // the page is ours once its script ran (it keeps the video Blobs); a page that is not (the site's
+                        // own 404, an error page) fails the job now instead of holding it until its time limit
+                        if (!pageChecked && opened.Elapsed.TotalSeconds > 30)
+                        {
+                            pageChecked = true;
+                            var ours = await cdp.EvalAsync("typeof window.__blobs === 'object' ? '' : document.title", ct).ConfigureAwait(false);
+                            if (ours.ValueKind == JsonValueKind.String && ours.GetString() is { Length: > 0 } title)
+                                return Outcome.Fail(WithLog($"the job page did not load on {studio}: the browser got \"{Clip(title.Trim(), 80)}\" instead", pageLog));
+                        }
                         var st = await cdp.EvalAsync("JSON.stringify({ d: window.__done === true, p: Number.isFinite(window.__progress) ? window.__progress : 0, s: typeof window.__stage === 'string' ? window.__stage : '' })", ct).ConfigureAwait(false);
                         if (st.ValueKind != JsonValueKind.String) continue;
                         using var sd = JsonDocument.Parse(st.GetString() ?? "{}");
@@ -1757,6 +1769,20 @@ try {
 </script></body></html>
 """;
 
+        /// <summary>The job page's requests go past any service worker of the Studio's origin. A video about the Studio
+        /// itself captures its pages first, in this same browser, and the Studio's service worker installs itself there;
+        /// it then answered the job page's navigation from the network (the site's 404) where request interception
+        /// cannot see it, and the job sat at 0 % until its time limit (2026-10-09).</summary>
+        private static async Task BypassServiceWorkerAsync(Cdp cdp, CancellationToken ct)
+        {
+            try
+            {
+                await cdp.SendAsync("Network.enable", null, ct).ConfigureAwait(false);
+                await cdp.SendAsync("Network.setBypassServiceWorker", new { bypass = true }, ct).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException) { }   // an old browser without it: no worse than before
+        }
+
         // ── probe: one look at the Studio's video API in a page of its own ─────────────────────────────────────
         /// <summary>probe { op: docs | spec | validate | frame | sheet, doc_json?, media: {name → file}, t, times, frames,
         /// cols, scale, studio_url } → { result: the page's result as JSON text, page_log }. A doc's files are named
@@ -1819,6 +1845,7 @@ try {
                     };
                     await cdp.SendAsync("Runtime.enable", null, ct).ConfigureAwait(false);
                     await cdp.SendAsync("Page.enable", null, ct).ConfigureAwait(false);
+                    await BypassServiceWorkerAsync(cdp, ct).ConfigureAwait(false);
                     await cdp.SendAsync("Fetch.enable", new { patterns = new[] { new { urlPattern = "*__vanity_*", requestStage = "Request" } } }, ct).ConfigureAwait(false);
                     await cdp.SendAsync("Page.addScriptToEvaluateOnNewDocument", new { source = "window.__job = " + pageJob.ToJsonString() + ";" }, ct).ConfigureAwait(false);
                     log($"[studio] {op} on {studio}");
