@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <RootNamespace>VanityStudio</RootNamespace>
     <AssemblyName>vanity-studio</AssemblyName>
-    <Version>1.0.2</Version>
+    <Version>1.0.3</Version>
     <LangVersion>latest</LangVersion>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <RollForward>Major</RollForward>
